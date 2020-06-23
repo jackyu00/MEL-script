@@ -1,0 +1,1 @@
+"C:\Program Files\Autodesk\Maya2015\bin\render.exe" -s 1 -e 10 -proj x:\byd -rd d:\temp D:\test.ma
