@@ -1,0 +1,1419 @@
+//  skeletonBuilder.mel
+//  Version 1.0
+//  NO: rig0001
+//
+//
+//  Copyright (C) 2005-2006 SOFA Studio  http://www.sofastudio.com
+//
+//  Creation Date:  Sep 2005
+//
+//  Modefied Date:  Nov 2008
+//
+//  Written By:     Jack Yu
+//
+//  Description:    g_skeletonBuilder_generateJoints : each control null sphere contain new 3 attributes "parent", "child" and "isLimbHead" to find out the
+//												  relationship in the hierarchy, just like link list data structure. function willcreate the skeleton accoring
+//												  to the data.
+
+
+proc int [] FBIKLableLookup( string $skeleton )
+{
+	string $types[] = { "None", "root", "hip","knee","ankle","toe","spine","neck","head","collar","shoulder","elbow","hand","fingerBase","fingerThumb","PropA","PropB","PropC","Other","fingerIndex","fingerMiddle","fingerRing","fingerPinky","Extra Finger","toeThumb","toeIndex","toeMiddle","toeRing","toePinky","heel" };
+	int $lableInfo[2];
+	string $array[];
+	$array = stringToStringArray($skeleton, "_");
+	
+	$lableInfo[0] = 3;
+	if ( $array[0] == "m" )
+		$lableInfo[0] = 0;
+	if ( $array[0] == "l" )
+		$lableInfo[0] = 1;
+	if ( $array[0] == "r" )
+		$lableInfo[0] = 2;	
+
+	for ( $i = 0; $i < size($types); $i++ )
+	{
+		string $str1 = toupper($array[1]);
+		string $str2 = toupper($types[$i]);
+		if ( `gmatch $str1 ("*"+$str2+"*")` )
+		{
+			$lableInfo[1] = $i;
+			break;
+		}
+	}
+	return $lableInfo;
+}
+
+proc float[] getQuadrupedData(string $parts)
+{
+	float $data[3]; //1,2,3:default position
+	switch ($parts)
+	{
+		case "headEnd": $data = { -0.001, 11.714, 14.515 }; break;
+		case "headA": $data = { -0.001, 14.309, 13.015 }; break;
+		case "jawBEnd": $data = { 0.034, 10.5, 12.445 }; break;
+		case "jawB": $data = { 0.034, 12.116, 10.681 }; break;
+		case "jawA": $data = { 0.034, 13.125, 10.614 }; break;
+		case "head": $data = { 0.034, 14.195, 9.642 }; break;		
+		case "neck": $data = { -0.003, 12.492, 6.03 }; break;
+		case "fingerPinkyEnd": $data = { -3.448, 0.012, 6.797 }; break;
+		case "fingerPinky3": $data = { -3.493, 0.145, 6.526 }; break;
+		case "fingerPinky2": $data = { -3.541, 0.29, 6.232 }; break;
+		case "fingerPinky1": $data = { -3.548, 0.395, 5.889 }; break;
+		case "fingerPinkyIn": $data = { -3.532, 0.461, 5.598 }; break;
+		case "fingerRingEnd": $data = { -3.243, 0.056, 6.785 }; break;
+		case "fingerRing3": $data = { -3.243, 0.179, 6.543 }; break;
+		case "fingerRing2": $data = { -3.243, 0.328, 6.249 }; break;
+		case "fingerRing1": $data = { -3.242, 0.395, 5.861 }; break;
+		case "fingerRingIn": $data = { -3.243, 0.47, 5.605 }; break;
+		case "fingerMiddleEnd": $data = { -2.943, 0.012, 6.776 }; break;
+		case "fingerMiddle3": $data = { -2.929, 0.145, 6.502 }; break;
+		case "fingerMiddle2": $data = { -2.914, 0.29, 6.205 }; break;
+		case "fingerMiddle1": $data = { -2.92, 0.395, 5.86 }; break;
+		case "fingerMiddleIn": $data = { -2.928, 0.461, 5.598 }; break;
+		case "fingerIndexEnd": $data = { -2.705, 0.012, 6.627 }; break;
+		case "fingerIndex3": $data = { -2.664, 0.145, 6.356 }; break;
+		case "fingerIndex2": $data = { -2.623, 0.29, 6.106 }; break;
+		case "fingerIndex1": $data = { -2.615, 0.395, 5.817 }; break;
+		case "fingerIndexIn": $data = { -2.662, 0.461, 5.598 }; break;
+		case "fingerThumbEnd": $data = { -2.228, 0.049, 5.527 }; break;
+		case "fingerThumb3": $data = { -2.393, 0.184, 5.341 }; break;
+		case "fingerThumb2": $data = { -2.551, 0.315, 5.187 }; break;
+		case "fingerThumb1": $data = { -2.722, 0.447, 5.042 }; break;
+		case "fingerThumbIn": $data = { -2.877, 0.636, 4.926 }; break;
+		case "palmEnd": $data = { -3.198, 0.035, 6.859 }; break;
+		case "palm": $data = { -3.198, 0.035, 5.631 }; break;
+		case "fingerBase": $data = { -3.198, 0.934, 4.906 }; break;
+		case "hand": $data = { -2.703, 3.373, 3.763 }; break;
+		case "elbow": $data = { -2.281, 7.954, 4.023 }; break;
+		case "shoulder": $data = { -2.385, 11.819, 5.295 }; break;
+		case "collar": $data = { -1.087, 12.926, 4.968 }; break;
+		case "chest": $data = { -0.006, 12.268, 3.154 }; break;
+		case "spineC": $data = { -0.002, 12.761, 0.789 }; break;
+		case "spineB": $data = { -0.002, 13.159, -1.759 }; break;
+		case "spineA": $data = { -0.002, 13.277, -4.991 }; break;
+		case "tailEnd": $data = { -0.002, 12.76, -15.628 }; break;
+		case "tail": $data = { -0.002, 12.76, -7.387 }; break;
+		case "toePinkyEnd": $data = { -3.369, 0.01, -7.555 }; break;
+		case "toePinky3": $data = { -3.413, 0.143, -7.826 }; break;
+		case "toePinky2": $data = { -3.462, 0.288, -8.12 }; break;
+		case "toePinky1": $data = { -3.468, 0.394, -8.463 }; break;
+		case "toePinkyIn": $data = { -3.452, 0.459, -8.754 }; break;
+		case "toeRingEnd": $data = { -3.164, 0.054, -7.567 }; break;
+		case "toeRing3": $data = { -3.164, 0.177, -7.809 }; break;
+		case "toeRing2": $data = { -3.164, 0.326, -8.104 }; break;
+		case "toeRing1": $data = { -3.162, 0.394, -8.491 }; break;
+		case "toeRingIn": $data = { -3.164, 0.468, -8.747 }; break;
+		case "toeMiddleEnd": $data = { -2.864, 0.01, -7.576 }; break;
+		case "toeMiddle3": $data = { -2.849, 0.143, -7.85 }; break;
+		case "toeMiddle2": $data = { -2.834, 0.288, -8.148 }; break;
+		case "toeMiddle1": $data = { -2.84, 0.394, -8.492 }; break;
+		case "toeMiddleIn": $data = { -2.849, 0.459, -8.754 }; break;
+		case "toeIndexEnd": $data = { -2.626, 0.01, -7.725 }; break;
+		case "toeIndex3": $data = { -2.584, 0.143, -7.996 }; break;
+		case "toeIndex2": $data = { -2.543, 0.288, -8.247 }; break;
+		case "toeIndex1": $data = { -2.535, 0.394, -8.535 }; break;
+		case "toeIndexIn": $data = { -2.583, 0.459, -8.754 }; break;
+		case "toeThumbEnd": $data = { -2.148, 0.048, -8.825 }; break;
+		case "toeThumb3": $data = { -2.314, 0.182, -9.011 }; break;
+		case "toeThumb2": $data = { -2.471, 0.313, -9.165 }; break;
+		case "toeThumb1": $data = { -2.643, 0.445, -9.31 }; break;
+		case "toeThumbIn": $data = { -2.797, 0.634, -9.426 }; break;
+		case "toeEnd": $data = { -3.118, 0.035, -7.521 }; break;
+		case "toe": $data = { -3.118, 0.035, -8.75 }; break;
+		case "ball": $data = { -3.118, 0.932, -9.446 }; break;
+		case "ankle": $data = { -2.721, 3.746, -9.354 }; break;
+		case "knee": $data = { -2.194 , 7.636, -7.412 }; break;
+		case "leg": $data = { -1.571, 11.785, -6.801 }; break;
+		case "hip": $data = { -0.793, 12.499, -6.334 }; break;
+		case "root": $data = { -0.002, 12.802, -6.891 }; break;	
+		default : $data = { 0, 0, 0 }; break;
+	}
+	return $data;
+}
+
+
+proc float[] getBipedData(string $parts)
+{
+	float $data[3]; //1,2,3:default position
+	switch ($parts)
+	{
+		case "root": $data = { 0.0,9.67,0.0 }; break;	
+		case "chest": $data = { 0.0,14.88263953,-0.3051959285 }; break;		
+		case "spineA": $data = { 0.0,10.713,-0.061 }; break;
+		case "spineB": $data = { 0.0,11.755,-0.122 }; break;
+		case "spineC": $data = { 0.0,12.798,-0.183 }; break;
+		case "spineD": $data = { 0.0,13.84,-0.244 }; break;
+		case "neck": $data = { 0.0,15.87168586,-0.05801780871 }; break;
+		case "head": $data = { 0.0,16.80084198,0.2949491446 }; break;
+		case "headEnd": $data = { 0.0,18.43252819,0.2830705433 }; break;
+		case "jaw": $data = { 0.0,16.7413322,0.3511857467 }; break;
+		case "jawEnd": $data = { 0.0,16.31374246,1.270057135 }; break;
+		case "collar": $data = { -0.8888144432,15.45541433,-0.02386229943 }; break;
+		case "shoulder": $data = { -2.330776535,15.28,-0.0238661549 }; break;
+		case "elbow": $data = { -5.050335696,15.28,-0.146 }; break;
+		case "hand": $data = { -7.754463067,15.28,0.03131208161 }; break;
+		case "fingerBase": $data = { -8.139690933,15.30879719,0.02833088223 }; break;
+		case "fingerMiddleIn": $data = { -8.538469725,15.31089662,0.0529087554 }; break;
+		case "fingerMiddle1": $data = { -8.879892807,15.34286968,0.06441418666 }; break;
+		case "fingerMiddle2": $data = { -9.416212827,15.3502507,0.07215231088 }; break;
+		case "fingerMiddle3": $data = { -9.643955537,15.35429475,0.07587724162 }; break;
+		case "fingerMiddleEnd": $data = { -9.834924244,15.33789959,0.07182615998 }; break;
+		case "fingerPinkyIn": $data = { -8.484274002,15.2837131,-0.2287465369 }; break;
+		case "fingerPinky1": $data = { -8.827279012,15.31274441,-0.3183076685 }; break;
+		case "fingerPinky2": $data = { -9.198974179,15.25899546,-0.3486150954 }; break;
+		case "fingerPinky3": $data = { -9.41463276,15.21840162,-0.3494296199 }; break;
+		case "fingerPinkyEnd": $data = { -9.544092662,15.1942218,-0.3492725213 }; break;
+		case "fingerRingIn": $data = { -8.514271546,15.29770438,-0.08549008843 }; break;
+		case "fingerRing1": $data = { -8.885705972,15.32732103,-0.1568732646 }; break;
+		case "fingerRing2": $data = { -9.340997682,15.31200432,-0.1639428002 }; break;
+		case "fingerRing3": $data = { -9.568803319,15.29295253,-0.1643850613 }; break;
+		case "fingerRingEnd": $data = { -9.734701671,15.27000457,-0.15822183 }; break;
+		case "fingerIndexIn": $data = { -8.532673564,15.30396552,0.2095272048 }; break;
+		case "fingerIndex1": $data = { -8.871773292,15.31790714,0.2860539849 }; break;
+		case "fingerIndex2": $data = { -9.376507656,15.34099986,0.3095377183 }; break;
+		case "fingerIndex3": $data = { -9.599740034,15.32950795,0.3159940547 }; break;
+		case "fingerIndexEnd": $data = { -9.766280886,15.31410644,0.3229121862 }; break;
+		case "fingerThumbIn": $data = { -8.104990282,15.17722466,0.1998501105 }; break;
+		case "fingerThumb1": $data = { -8.312309581,15.10092418,0.4004901128 }; break;
+		case "fingerThumb2": $data = { -8.502019993,15.03110437,0.5840885442 }; break;
+		case "fingerThumb3": $data = { -8.819730326,14.98618249,0.7314430247 }; break;
+		case "fingerThumbEnd": $data = { -9.124333903,14.9384461,0.8390260433 }; break;	
+		case "rib1": $data = { -0.103465,13.8951,-0.291893 }; break;
+		case "rib2": $data = { -0.103469,12.8421,-0.202405 }; break;
+		case "rib3": $data = { -0.103453696,11.7790073,-0.12963799 }; break;
+		case "rib1End": $data = { -1.44793,13.8951,0.12584 }; break;		 
+		case "rib2End": $data = { -1.24694,12.8421,0.215329 }; break;
+		case "rib3End": $data = { -1.1303,11.779,0.288095 }; break;		
+		case "hip": $data = { -0.6,9.67,0.0 }; break;
+		case "tail": $data = { 0.0,9.67,-1.0 }; break;
+		case "tailEnd": $data = { -0.0,9.67,-8.0 }; break;
+		case "leg": $data = { -1.125,9.67,0.0 }; break;
+		case "knee": $data = { -1.125,5.354,0.0 }; break;
+		case "ankle": $data = { -1.125,0.657106769,-0.3369647199 }; break;
+		case "ball": $data = { -1.160703267,0.05671213403,0.7341132808 }; break;
+		case "toePinkyIn": $data = { -1.306544963,0.03535900182,1.084671834 }; break;
+		case "toePinky1": $data = { -1.329581341,0.02719942085,1.171380665 }; break;
+		case "toePinky2": $data = { -1.341524698,0.01955933465,1.247987142 }; break;
+		case "toePinky3": $data = { -1.348528627,0.01507896811,1.335114582 }; break;
+		case "toePinkyEnd": $data = { -1.35683438,0.009765832921,1.412734154 }; break;
+		case "toeRingIn": $data = { -1.224795179,0.03535900182,1.115976283 }; break;
+		case "toeRing1": $data = { -1.239888078,0.02719942085,1.222943116 }; break;
+		case "toeRing2": $data = { -1.250057767,0.01955933465,1.298993259 }; break;
+		case "toeRing3": $data = { -1.264092114,0.01507896811,1.386257198 }; break;
+		case "toeRingEnd": $data = { -1.274089427,0.009765832921,1.463677074 }; break;
+		case "toeMiddleIn": $data = { -1.16154815,0.03535900182,1.150695587 }; break;
+		case "toeMiddle1": $data = { -1.161871001,0.02719942085,1.258477794 }; break;
+		case "toeMiddle2": $data = { -1.162173298,0.01955933465,1.35612508 }; break;
+		case "toeMiddle3": $data = { -1.162350574,0.01507896811,1.4435334 }; break;
+		case "toeMiddleEnd": $data = { -1.162560799,0.009765832921,1.521486059 }; break;
+		case "toeIndexIn": $data = { -1.091951601,0.03535900182,1.151502415 }; break;
+		case "toeIndex1": $data = { -1.081931103,0.02719942085,1.258818294 }; break;
+		case "toeIndex2": $data = { -1.072862605,0.01955933465,1.356044043 }; break;
+		case "toeIndex3": $data = { -1.064652106,0.01507896811,1.443066072 }; break;
+		case "toeIndexEnd": $data = { -1.05738169,0.009765832921,1.520679231 }; break;
+		case "toeThumbIn": $data = { -0.985121313,0.03535900182,1.171269291 }; break;
+		case "toeThumb1": $data = { -0.9709827187,0.02719942085,1.279044348 }; break;
+		case "toeThumb2": $data = { -0.9721546866,0.01955933465,1.376685069 }; break;
+		case "toeThumb3": $data = { -0.973110446,0.01507896811,1.464088343 }; break;
+		case "toeThumbEnd": $data = { -0.9740149392,0.009765832921,1.542036038 }; break;
+		case "heel": $data = { -1.12535,0.5832731405,-0.3565174484 }; break;
+		case "heelEnd": $data = { -1.12535,0.03368261479,-0.4769123871 }; break;
+		case "toe": $data = { -1.161,0.01,1.58 }; break;
+		default : $data = { 0, 0, 0 }; break;
+	}	
+	return $data;
+}
+
+proc string[] createJointChainGroups( string $chainName[], int $inertJointNum[], string $parentSide, string $side, int $skeletonType )
+{
+	$parent = $parentSide + $chainName[0];
+	int $index = 0;
+	string $tmp[];
+	vector $pos[];
+	// Put inerted joint list into array
+	for ( $i = 1; $i < size($chainName); $i++ )
+	{
+		// Get position from table
+		float $data[3];
+		if ( $skeletonType == 1 )
+			$data = getBipedData( $chainName[$i] );
+		if ( $skeletonType == 2 )
+			$data = getQuadrupedData( $chainName[$i] );	
+
+		// Push data into array
+		$pos[$index] = <<$data[0] ,$data[1] ,$data[2]>>;		
+		$tmp[$index] = ($side+$chainName[$i]);
+		
+		// Counting
+		$index++;
+		
+		// Caculate step if new joints need to be inserted
+		float $data1[3];
+		if ( $skeletonType == 1 )
+			$data1 = getBipedData( $chainName[$i+1] );
+		if ( $skeletonType == 2 )
+			$data1 = getQuadrupedData( $chainName[$i+1] );	
+			
+		vector $step = (<<$data1[0]-$data[0] ,$data1[1]-$data[1] ,$data1[2]-$data[2]>>) / ($inertJointNum[$i]+1.0);			
+		
+		for ( $j = 0; $j < $inertJointNum[$i]; $j++ )
+		{
+			int $k = $j + 1;
+			$tmp[$index] = ($side+$chainName[$i]+$k);
+			$pos[$index] = <<$data[0] ,$data[1] ,$data[2]>> + $step*$k;		
+			$index++;
+		}	
+	}
+	
+	// Create group based on array content
+	for ( $i = 0; $i < size($tmp); $i++ )
+	{
+		if ( $i == 0 )
+		{
+			string $groupName = $tmp[$i];	
+			group -em -n $groupName;
+			addAttr -longName parent -dataType "string" $groupName;
+			addAttr -longName child -dataType "string" $groupName;
+			addAttr -ln isLimbHead -at long  -dv 1 $groupName;
+			setAttr -e -type "string" ($groupName +".parent")  $parent;
+			setAttr -e -type "string" ($groupName +".child")  ($tmp[$i+1]);			
+			if ( `objExists $parent` )
+				parent ($tmp[$i]) $parent;
+		}
+		else
+		{
+			string $groupName = ($tmp[$i]);
+			group -em -n $groupName -p ($tmp[$i-1]);	
+			addAttr -longName parent -dataType "string" $groupName;
+			addAttr -longName child -dataType "string" $groupName;
+			addAttr -ln isLimbHead -at long  -dv 0 $groupName;
+			setAttr -e -type "string" ($groupName +".parent")  ($tmp[$i-1]);
+			if ( $i != (size($tmp)-1) )
+				setAttr -e -type "string" ($groupName +".child")  ($tmp[$i+1]);
+		}		
+		// Move group to position
+		int $coff = 1.0;
+		if ($side == "l_")
+			$coff = -1.0;
+		vector $tmpos = $pos[$i];
+		xform -os -piv ($tmpos.x*$coff) ($tmpos.y) ($tmpos.z);
+	}	  
+
+	return $tmp;
+}
+
+proc string recursiveCreatingCurves( string $limbHead )
+{
+	global int $gSkeletonBuilder_curveKnotIndex;
+	float $pos[3] = `xform -q -pivots $limbHead`;		
+	string $cmd = ("-p "+$pos[0]+" "+$pos[1]+" "+$pos[2]+" -k "+$gSkeletonBuilder_curveKnotIndex+" " );
+	$gSkeletonBuilder_curveKnotIndex++;
+	string $child =`getAttr ($limbHead+".child")`;
+	if ( $child != "" )
+		return(  $cmd + recursiveCreatingCurves( $child ));
+	else
+		return $cmd;
+}
+
+
+proc recursiveCreatingNullSpheresAndClusters( string $limbHead, string $curveName )
+{
+	global int $gSkeletonBuilder_curveKnotIndex;
+	global string $gSkeletonBuilder_rigCluster;
+	global string $gSkeletonBuilder_rigNull;
+	float $pos[3] = `xform -q -pivots $limbHead`;	
+	
+	string $clusterHandle[2] = `cluster -n ($limbHead+"Cluster"+$curveName) ($curveName+".cv["+$gSkeletonBuilder_curveKnotIndex+"]")`;
+	parent $clusterHandle[1] $gSkeletonBuilder_rigCluster;
+	$gSkeletonBuilder_curveKnotIndex++;
+	
+	//create null sphere
+	string $nullSphereName = ($limbHead+"Null");	
+
+	curve -n $nullSphereName -d 1 -p 0 0 0.0958837849 -p 0 0.04794189245 0.08303775482 -p 0 0.08303775482 0.04794189245 -p 0 0.0958837849 0 -p 0 0.08303775482 -0.04794189245 -p 0 0.04794189245 -0.08303775482 -p 0 0 -0.0958837849 -p 0 -0.04794189245 -0.08303775482 -p 0 -0.08303775482 -0.04794189245 -p 0 -0.0958837849 0 -p 0 -0.08303775482 0.04794189245 -p 0 -0.04794189245 0.08303775482 -p 0 0 0.0958837849 -p 0.06780009549 0 0.06780009549 -p 0.0958837849 0 0 -p 0.06780009549 0 -0.06780009549 -p 0 0 -0.0958837849 -p -0.06780009549 0 -0.06780009549 -p -0.0958837849 0 0 -p -0.08303775482 0.04794189245 0 -p -0.04794189245 0.08303775482 0 -p 0 0.0958837849 0 -p 0.04794189245 0.08303775482 0 -p 0.08303775482 0.04794189245 0 -p 0.0958837849 0 0 -p 0.08303775482 -0.04794189245 0 -p 0.04794189245 -0.08303775482 0 -p 0 -0.0958837849 0 -p -0.04794189245 -0.08303775482 0 -p -0.08303775482 -0.04794189245 0 -p -0.0958837849 0 0 -p -0.06780009549 0 0.06780009549 -p 0 0 0.0958837849;
+	
+	if ( `gmatch $nullSphereName "*_*S*Null"` )
+	{
+		setAttr ($nullSphereName+".overrideEnabled") 1;		
+		setAttr ($nullSphereName+".overrideColor") 3;
+	}
+	else
+	{
+		setAttr ($nullSphereName+".overrideEnabled") 1;		
+		setAttr ($nullSphereName+".overrideColor") 14;
+	}
+	
+	string $grp = ($limbHead+"Null_grp");
+	group -em -n $grp;
+	parent $nullSphereName $grp;
+	//curve -n $nullSphereName -d 1 -p 0 0 0.0984724447 -p 0 0.04923622236 0.08527959895 -p 0 0.08527959895 0.04923622236 -p 0 0.0984724447 0 -p 0 0.08527959895 -0.04923622236 -p 0 0.04923622236 -0.08527959895 -p 0 0 -0.0984724447 -p 0 -0.04923622236 -0.08527959895 -p 0 -0.08527959895 -0.04923622236 -p 0 -0.0984724447 0 -p 0 -0.08527959895 0.04923622236 -p 0 -0.04923622236 0.08527959895 -p 0 0 0.0984724447 -p 0.069630555 0 0.069630555 -p 0.0984724447 0 0 -p 0.069630555 0 -0.069630555 -p 0 0 -0.0984724447 -p -0.069630555 0 -0.069630555 -p -0.0984724447 0 0 -p -0.08527959895 0.04923622236 0 -p -0.04923622236 0.08527959895 0 -p 0 0.0984724447 0 -p 0.04923622236 0.08527959895 0 -p 0.08527959895 0.04923622236 0 -p 0.0984724447 0 0 -p 0.08527959895 -0.04923622236 0 -p 0.04923622236 -0.08527959895 0 -p 0 -0.0984724447 0 -p -0.04923622236 -0.08527959895 0 -p -0.08527959895 -0.04923622236 0 -p -0.0984724447 0 0 -p -0.069630555 0 0.069630555 -p 0 0 0.0984724447; 
+	setAttr ($grp+ ".translate ") $pos[0] $pos[1] $pos[2];
+	//add new attributes "parent" and "child" to indicate the hierarchy relation in the skeleton,
+	//when the attributes equal to"NULL" mean no object found		
+	addAttr -longName parent -dataType "string" $nullSphereName;
+	addAttr -longName child -dataType "string" $nullSphereName;
+	addAttr -ln isLimbHead -at long  -dv 0 $nullSphereName;
+	string $parentAttr = ( (`getAttr ($limbHead+".parent")`) + "Null" );
+	string $childAttr = ( (`getAttr ($limbHead+".child")`) + "Null" );
+	if (`attributeExists "controlParent" $limbHead`)
+	{	
+		string $parentControlAttr = ( (`getAttr ($limbHead+".controlParent")`) + "Null" );
+		addAttr -longName controlParent -dataType "string" $nullSphereName;
+		setAttr -e -type "string" ($nullSphereName +".controlParent")  $parentControlAttr;	
+	}
+	setAttr -e -type "string" ($nullSphereName +".parent")  $parentAttr;
+	setAttr -e -type "string" ($nullSphereName +".child")  $childAttr;
+	setAttr ($nullSphereName +".isLimbHead")  (`getAttr ($limbHead+".isLimbHead")`);
+	parent $grp $gSkeletonBuilder_rigNull;
+	
+	//constrain control sphere with cluster
+	eval ( "pointConstraint "+$nullSphereName+" "+$clusterHandle[1] );//some "pointConstraint" operation can't be perfomed during the recursive loop cause the operating component may not be created yet
+	
+	string $child =`getAttr ($limbHead+".child")`;
+	if ( $child != "" )
+		recursiveCreatingNullSpheresAndClusters( $child, $curveName );
+}
+
+proc createWireHierarchySkeleton( string $gSkeletonBuilder_rigTmp )
+{
+	global string $gSkeletonBuilder_rigCurve;
+	global string $gSkeletonBuilder_rigCluster;
+	global string $gSkeletonBuilder_rigTmp;
+	string $limbHeads[];
+	int $index = 0;
+	string $subTrees[];
+	
+	//fin out all heads for each limb
+	$subTrees = `listRelatives -ad $gSkeletonBuilder_rigTmp`;
+	for ( $i = 0; $i < size($subTrees); $i++ )
+	{
+		if ( `getAttr ($subTrees[$i]+".isLimbHead")` == 1 )
+		{
+			$limbHeads[$index] =  $subTrees[$i];
+			$index++;			
+		}
+	}	
+	
+	string $limbHeadConstrainCmd;
+	for ( $i = 0; $i < size($limbHeads); $i++ )
+	{				
+		//create curve
+		global int $gSkeletonBuilder_curveKnotIndex;//declare global index for recursive counting knot number of curve
+		$gSkeletonBuilder_curveKnotIndex = 0;		
+		string $curveName = ( $limbHeads[$i]+"Curve" );	
+		string $cmd = ( "curve -d 1 -n "+ $curveName );	
+		string $parent =`getAttr ($limbHeads[$i]+".parent")`;		
+		if ( `objExists $parent` )//draw the curve betweeb limbHead and its parent if parent is not null
+		{
+			float $pos[3] = `xform -q -pivots $parent`;
+			$cmd += ("-p "+$pos[0]+" "+$pos[1]+" "+$pos[2]+" -k "+$gSkeletonBuilder_curveKnotIndex+" " );
+			$gSkeletonBuilder_curveKnotIndex++;
+		}	
+		$cmd += recursiveCreatingCurves( $limbHeads[$i] );
+		eval $cmd;
+		
+		parent $curveName $gSkeletonBuilder_rigCurve;//put curve into rig_curve group
+		
+		//create sphere and cluster
+		$gSkeletonBuilder_curveKnotIndex = 0;		
+		
+		if ( $parent != "" )
+		{
+			string $clusterHandle[2] = `cluster -n ($parent+"Cluster"+$curveName) ($curveName+".cv["+$gSkeletonBuilder_curveKnotIndex+"]")`;
+			parent $clusterHandle[1] $gSkeletonBuilder_rigCluster;
+			$gSkeletonBuilder_curveKnotIndex++;
+			$limbHeadConstrainCmd += ( "pointConstraint "+$parent+"Null "+$clusterHandle[1]+";" );
+		}		
+		recursiveCreatingNullSpheresAndClusters( $limbHeads[$i], $curveName );			
+	}
+	eval $limbHeadConstrainCmd ;
+}
+
+proc addCurveControls( string $globalCtrl, string $joints[] )
+{
+	global string $gSkeletonBuilder_rigNull;
+	global string $gSkeletonBuilder_rigGrp;	
+	global string $gSkeletonBuilder_rigControl;
+	group -em -n $gSkeletonBuilder_rigControl;
+	parent $gSkeletonBuilder_rigControl $gSkeletonBuilder_rigGrp;
+	parentConstraint -mo -weight 1 $globalCtrl $gSkeletonBuilder_rigControl;
+	scaleConstraint -offset 1 1 1 -weight 1 $globalCtrl $gSkeletonBuilder_rigControl;
+	
+	addAttr -ln "showControl" -min 0 -max 1 -dv 1 -at double -k 1 $globalCtrl;
+	addAttr -ln "showJoint" -min 0 -max 1 -dv 1 -at double -k 1 $globalCtrl;
+	
+	connectAttr -f ($globalCtrl+".showJoint") ($gSkeletonBuilder_rigNull+".v");
+	connectAttr -f ($globalCtrl+".showControl") ($gSkeletonBuilder_rigControl+".v");
+	
+	for ( $joint in $joints )
+	{		
+		string $control = ($joint+"_ctl") ;
+
+		string $child;
+		if (`attributeExists "child" $joint`)		
+			$child = `getAttr ($joint+".child")`;
+
+		float $rad = 0.5;
+		// Make control smaller for finger and toe
+		if ( `gmatch $joint "*toe*"` || `gmatch $joint "*finger*"` )
+			$rad = 0.2;
+		
+		if ( `objExists	$child` )
+			circle -n $control -c 0 0 0 -nr 0 1 0 -sw 360 -r $rad -d 3 -ut 0 -tol 0.01 -s 8 -ch 0;
+		else
+			group -em -n $control;		
+		
+		setAttr -lock true -keyable false ($control+".sx");
+		setAttr -lock true -keyable false ($control+".sy");
+		setAttr -lock true -keyable false ($control+".sz");
+		setAttr -lock true -keyable false ($control+".v");		
+			
+		string $control_grp = ($joint+"_grp");
+		group -em -n $control_grp;
+		parent $control $control_grp;
+		parent $control_grp $gSkeletonBuilder_rigControl;
+		setAttr ($control+".overrideEnabled") 1;		
+		int $colorIndex = 17;		
+		if ( `gmatch $joint "l_*"` )
+			$colorIndex = 13;
+		if ( `gmatch $joint "r_*"` )
+			$colorIndex = 6;		
+		setAttr ($control+".overrideColor") $colorIndex;	
+		
+		float $pos[3] = `xform -q -rp -ws ($joint)`;	
+		setAttr ($control_grp+".translateX") $pos[0];
+		setAttr ($control_grp+".translateY") $pos[1];
+		setAttr ($control_grp+".translateZ") $pos[2];
+		
+		if ( `objExists	$child` )
+		{
+			string $tmp[] = `aimConstraint -offset 0 0 0 -weight 1 -aimVector 0 1 0 -upVector 1 0 0 -worldUpType "vector" -worldUpVector 0 1 0 $child $control_grp`;
+			delete $tmp[0];	
+		}
+	}
+	
+	for ( $joint in $joints )
+	{
+		string $parent;
+		if (`attributeExists "controlParent" $joint`)
+			$parent = `getAttr ($joint+".controlParent")`;
+		else
+		{			
+			if (`attributeExists "parent" $joint`)	
+				$parent = `getAttr ($joint+".parent")`;	
+		}
+		string $control = ($joint+"_ctl");	
+		if ( `objExists	$control` )		
+		{
+			if ( `objExists	($parent+"_grp")` )			
+				parentConstraint -mo -weight 1 ($parent+"_ctl") ($joint+"_grp");
+			if ( `objExists	($joint+"Null_grp")` )	
+				parentConstraint -mo -weight 1 $control ($joint+"Null_grp");
+		}		
+	}
+}
+
+proc string addSplitedGroups( string $startNode, int $sectionNumber )
+{		
+	string $endNode;
+	string $inBetweenSymbol = "S";
+	if (`attributeExists "child" $startNode`)	
+		$endNode = `getAttr ($startNode+".child")`;
+	
+	if (!`objExists $endNode`)
+		return "";
+
+	addAttr -longName controlParent -dataType "string" $endNode;
+	setAttr -e -type "string" ($endNode +".controlParent") $startNode;
+		
+	global string $gSkeletonBuilder_rigTmp;
+	float $pos1[3] = `xform -q -ws -rp $startNode`;
+	float $pos2[3] = `xform -q -ws -rp $endNode`;
+	vector $vector = << ($pos2[0] - $pos1[0]), ($pos2[1] - $pos1[1]), ($pos2[2] - $pos1[2])  >>;
+	float $step = mag ( $vector ) / ($sectionNumber+1);
+	vector $unitVector = unit ( $vector );
+	string $cmd;
+	float $constrinWeightStep = 1.0 / ($sectionNumber+1);
+	$newGroupName = ($startNode+$inBetweenSymbol);
+	for ( $i = 1; $i <= $sectionNumber; $i++ )
+	{
+		//calculate pos and set
+		vector $v = $i * $step * $unitVector;
+		float $newPos[3] = { $v.x+$pos1[0], $v.y+$pos1[1], $v.z+$pos1[2] };
+		string $groupName = ($newGroupName+$i);
+		group -em -n $groupName;
+		xform -os -piv $newPos[0] $newPos[1] $newPos[2];	
+		addAttr -longName parent -dataType "string" $groupName;
+		addAttr -longName child -dataType "string" $groupName;
+		addAttr -ln isLimbHead -at long -dv 0 $groupName;
+		
+		if ( $i == 1 )
+		{
+			parent $groupName  $startNode;
+			setAttr -e -type "string" ($groupName +".parent")  $startNode;
+			if ( $i == $sectionNumber )
+			{
+				setAttr -e -type "string" ($groupName +".child")  $endNode;
+				parent $endNode $groupName;
+			}
+			else
+				setAttr -e -type "string" ($groupName +".child")  ($newGroupName+($i+1));
+			setAttr -e -type "string" ($startNode +".child")  $groupName;
+		}
+		else if ( $i == $sectionNumber )
+		{
+			parent $groupName ($newGroupName+($i-1));
+			parent $endNode $groupName;
+			setAttr -e -type "string" ($groupName +".parent")  ($newGroupName+($i-1));
+			setAttr -e -type "string" ($groupName +".child")  $endNode;
+			setAttr -e -type "string" ($endNode +".parent")  $groupName;	
+		}
+		else
+		{
+			parent $groupName ($newGroupName+($i-1));
+			setAttr -e -type "string" ($groupName +".parent")  ($newGroupName+($i-1));
+			setAttr -e -type "string" ($groupName +".child")  ($newGroupName+($i+1));	
+		}
+		
+		float $w = $constrinWeightStep * $i;
+		string $constrainName = ( $startNode+$endNode+$groupName +"Constrain" );
+		string $startNull =  ( $startNode + "Null" );
+		string $endNull =  ( $endNode + "Null" );
+		string $groupNull = ( $groupName + "Null" );
+		$cmd += ( "pointConstraint -n "+$constrainName+" -weight "+$w+" "+$startNull+" "+$endNull+" "+$groupNull+";" );
+		$cmd += ( "setAttr "+$constrainName+"."+$startNull+"W0 "+(1 - $w)+";" );
+	}
+	return $cmd;
+}
+
+proc int[] getInsertJointNumber( string $jointChainList[] )
+{
+	int $num[];
+	int $index = 0;	
+	string $UIName = "";
+	int $tmp = 0;
+	for ( $jointChain in $jointChainList )
+	{
+		$tmp = 0;
+		if ( $jointChain != "" )
+		{
+			$UIName = ($jointChain + "InsertJointNumberIFG");
+			if ( `intFieldGrp -q -ex $UIName` )				
+				$tmp = `intFieldGrp -q -v1 $UIName`;
+			else
+			{
+				$UIName = (substring($jointChain,1,size($jointChain)-1) + "InsertJointNumberIFG");
+				if ( `intFieldGrp -q -ex $UIName` )				
+					$tmp = `intFieldGrp -q -v1 $UIName`;
+			}
+		}		
+		$num[$index] = $tmp;
+		$index++;
+	}
+	return $num;
+}
+
+proc int[] getSplitJointNumber( string $jointChainList[] )
+{
+	int $num[];
+	int $index = 0;	
+	string $UIName = "";
+	int $tmp = 0;
+	for ( $jointChain in $jointChainList )
+	{
+		$tmp = 0;
+		$jointChain = substring($jointChain,3,size($jointChain));
+		
+		$UIName = ($jointChain + "SplitJointNumberIFG"); //"jaw"SplitJointNumberIFG
+		if ( `intFieldGrp -q -ex $UIName` )				
+			$tmp = `intFieldGrp -q -v1 $UIName`;
+		else
+		{
+			$UIName = (substring($jointChain,1,size($jointChain)-1) + "SplitJointNumberIFG"); //"jawA"SplitJointNumberIFG
+			if ( `intFieldGrp -q -ex $UIName` )				
+				$tmp = `intFieldGrp -q -v1 $UIName`;
+			else
+			{
+				$UIName = (substring($jointChain,1,size($jointChain)-2) + "SplitJointNumberIFG"); //"jawA1"SplitJointNumberIFG
+				if ( `intFieldGrp -q -ex $UIName` )				
+					$tmp = `intFieldGrp -q -v1 $UIName`;
+				else
+				{
+					$UIName = (substring($jointChain,1,size($jointChain)-3) + "SplitJointNumberIFG"); //"jawA99"SplitJointNumberIFG
+					if ( `intFieldGrp -q -ex $UIName` )				
+						$tmp = `intFieldGrp -q -v1 $UIName`;
+				}
+			}
+		}
+		
+		$num[$index] = $tmp;
+		$index++;
+	}
+	return $num;
+}
+
+proc stringArrayAppend( string $mainString[], string $appendString[] )
+{
+	int $size = size($mainString);	
+	for ( $str in $appendString )
+	{
+		$mainString[$size] = $str;
+		$size++;
+	}
+}
+
+global proc createDefaultHierarchyGroups()
+{
+	// Hierarchy will be created in Dag structure with empty groups, each group's pivot position is the joint which will be placed later.
+	global string $gSkeletonBuilder_rigTmp;
+	global string $gSkeletonBuilder_rigGrp;	
+	global string $gSkeletonBuilder_rigCurve;
+	global string $gSkeletonBuilder_rigCluster;
+	global string $gSkeletonBuilder_rigNull;
+	string $globalCtrl = "GlobalContorl";
+	int $inertJointNum[];
+	string $plusControl[];
+	string $temp[];		
+	
+	if( `objExists $gSkeletonBuilder_rigGrp` )
+		error ("Please delete pervious \""+$gSkeletonBuilder_rigGrp+"\"");
+
+	group -em -n $gSkeletonBuilder_rigTmp;
+	group -em -n $gSkeletonBuilder_rigGrp;
+	group -em -n $gSkeletonBuilder_rigCurve;
+	group -em -n $gSkeletonBuilder_rigCluster;
+	setAttr ($gSkeletonBuilder_rigCurve+".template") 1;
+	setAttr ($gSkeletonBuilder_rigCluster+".visibility") 0;
+	group -em -n $gSkeletonBuilder_rigNull;
+	circle -n $globalCtrl -c 0 0 0 -nr 0 1 0 -sw 360 -r 3 -d 3 -ut 0 -tol 0.01 -s 8 -ch 1;
+	setAttr ($globalCtrl+".overrideEnabled") 1;		
+	setAttr ($globalCtrl+".overrideColor") 17;	
+	parent $gSkeletonBuilder_rigTmp $gSkeletonBuilder_rigCurve $gSkeletonBuilder_rigCluster $gSkeletonBuilder_rigNull $globalCtrl $gSkeletonBuilder_rigGrp;
+	connectAttr -f ($globalCtrl+".scale")     ($gSkeletonBuilder_rigNull+".scale");
+	connectAttr -f ($globalCtrl+".translate") ($gSkeletonBuilder_rigNull+".translate");
+	connectAttr -f ($globalCtrl+".rotate")    ($gSkeletonBuilder_rigNull+".rotate");
+
+	string $left = "l_";
+	string $right = "r_";
+	string $middle = "m_";	
+	
+	int $skeletonType = `optionMenuGrp -q -sl skeletonTypeOMG`;		
+
+	//***create spine chain groups*******************************************************************
+	string $spineChain[] = { "", "root", "spineA", "spineB", "spineC", "spineD", "chest", "neck", "head", "headEnd" };
+	if ( $skeletonType == 2 )
+		$spineChain = { "", "root", "spineA", "spineB", "spineC", "chest", "neck", "head", "headA", "headEnd" };	
+	$inertJointNum = getInsertJointNumber($spineChain);	
+	$spineChain = createJointChainGroups( $spineChain, $inertJointNum, "", $middle, $skeletonType );
+	int $spineSplitJointNum[] = getSplitJointNumber($spineChain);	
+	parent $spineChain[0] $gSkeletonBuilder_rigTmp;
+	stringArrayAppend($plusControl,$spineChain);	
+	
+	//***create jaw chain groups*******************************************************************
+	string $jawChain[] = { "head", "jaw", "jawEnd" };
+	if ( $skeletonType == 2 )
+		$jawChain = { "head", "jawA", "jawB", "jawBEnd" };
+	$inertJointNum = getInsertJointNumber($jawChain);	
+	$jawChain = createJointChainGroups( $jawChain, $inertJointNum, $middle, $middle, $skeletonType );
+	int $jawSplitJointNum[] = getSplitJointNumber($jawChain);	
+	stringArrayAppend($plusControl,$jawChain);
+	
+	//***create tail chain groups*******************************************************************
+	string $tailChain[] = { "root", "tail", "tailEnd" };
+	int $tailSplitJointNum[];
+	if ( `checkBox -q -v skeletonBuilderTailCB` == 1 )
+	{			
+		$inertJointNum = getInsertJointNumber($tailChain);	
+		$tailChain = createJointChainGroups( $tailChain, $inertJointNum, $middle, $middle, $skeletonType );	
+		$tailSplitJointNum = getSplitJointNumber($tailChain);	
+		stringArrayAppend($plusControl,$tailChain);
+	}
+	
+	//******create arms chain groups***************************************************************	
+	string $leftArmChain[] = { "chest", "collar", "shoulder", "elbow", "hand", "fingerBase" };
+	int $leftArmSplitJointNum[];
+	if ( `checkBox -q -v skeletonBuilderFingerCB` )
+	{	
+		$inertJointNum = getInsertJointNumber($leftArmChain);
+		$leftArmChain = createJointChainGroups( $leftArmChain, $inertJointNum, $middle, $left, $skeletonType );
+		$leftArmSplitJointNum = getSplitJointNumber($leftArmChain);	
+		stringArrayAppend($plusControl,$leftArmChain);	
+	}
+	else
+	{
+		if ( $skeletonType == 2 )
+			$leftArmChain = { "chest", "collar", "shoulder", "elbow", "hand", "fingerBase", "palm", "palmEnd" };
+		$inertJointNum = getInsertJointNumber($leftArmChain);
+		$leftArmChain = createJointChainGroups( $leftArmChain, $inertJointNum, $middle, $left, $skeletonType );
+		$leftArmSplitJointNum = getSplitJointNumber($leftArmChain);	
+		stringArrayAppend($plusControl,$leftArmChain);	
+	}
+	
+	string $rightArmChain[] = { "chest", "collar", "shoulder", "elbow", "hand", "fingerBase" };
+	int $rightArmSplitJointNum[];
+	if ( `checkBox -q -v skeletonBuilderFingerCB` )
+	{	
+		$inertJointNum = getInsertJointNumber($rightArmChain);
+		$rightArmChain = createJointChainGroups( $rightArmChain, $inertJointNum, $middle, $right, $skeletonType );
+		$rightArmSplitJointNum = getSplitJointNumber($rightArmChain);	
+		stringArrayAppend($plusControl,$rightArmChain);	
+	}
+	else
+	{
+		if ( $skeletonType == 2 )
+			$rightArmChain = { "chest", "collar", "shoulder", "elbow", "hand", "fingerBase", "palm", "palmEnd" };
+		$inertJointNum = getInsertJointNumber($rightArmChain);
+		$rightArmChain = createJointChainGroups( $rightArmChain, $inertJointNum, $middle, $right, $skeletonType );
+		$rightArmSplitJointNum = getSplitJointNumber($rightArmChain);	
+		stringArrayAppend($plusControl,$rightArmChain);	
+	}
+	
+	if ( `checkBox -q -v skeletonBuilderFingerCB` )
+	{	
+		//***create fingers chain groups*******************************************************************		
+		if ( `checkBox -q -v skeletonBuilderThumbCB` == 1 )
+		{
+			string $fingerThumbChain[] = { "fingerBase", "fingerThumbIn", "fingerThumb1", "fingerThumb2", "fingerThumb3", "fingerThumbEnd" };
+			$inertJointNum = getInsertJointNumber($fingerThumbChain);	
+			$temp = createJointChainGroups( $fingerThumbChain, $inertJointNum, $left, $left, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+			$temp = createJointChainGroups( $fingerThumbChain, $inertJointNum, $right, $right, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+		}
+		
+		if ( `checkBox -q -v skeletonBuilderIndexCB` == 1 )
+		{
+			string $fingerIndexChain[] = { "fingerBase", "fingerIndexIn", "fingerIndex1", "fingerIndex2", "fingerIndex3", "fingerIndexEnd" };
+			$inertJointNum = getInsertJointNumber($fingerIndexChain);	
+			$temp = createJointChainGroups( $fingerIndexChain, $inertJointNum, $left, $left, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+			$temp = createJointChainGroups( $fingerIndexChain, $inertJointNum, $right, $right, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+		}
+		
+		if ( `checkBox -q -v skeletonBuilderMiddleCB` == 1 )
+		{
+			string $fingerMiddleChain[] = { "fingerBase", "fingerMiddleIn", "fingerMiddle1", "fingerMiddle2", "fingerMiddle3", "fingerMiddleEnd" };
+			$inertJointNum = getInsertJointNumber($fingerMiddleChain);	
+			$temp = createJointChainGroups( $fingerMiddleChain, $inertJointNum, $left, $left, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+			$temp = createJointChainGroups( $fingerMiddleChain, $inertJointNum, $right, $right, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+		}
+		
+		if ( `checkBox -q -v skeletonBuilderRingCB` == 1 )
+		{
+			string $fingerRingChain[] = { "fingerBase", "fingerRingIn", "fingerRing1", "fingerRing2", "fingerRing3", "fingerRingEnd" };
+			$inertJointNum = getInsertJointNumber($fingerRingChain);	
+			$temp = createJointChainGroups( $fingerRingChain, $inertJointNum, $left, $left, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+			$temp = createJointChainGroups( $fingerRingChain, $inertJointNum, $right, $right, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+		}
+		
+		if ( `checkBox -q -v skeletonBuilderPinkyCB` == 1 )
+		{
+			string $fingerPinkyChain[] = { "fingerBase", "fingerPinkyIn", "fingerPinky1", "fingerPinky2", "fingerPinky3", "fingerPinkyEnd" };
+			$inertJointNum = getInsertJointNumber($fingerPinkyChain);	
+			$temp = createJointChainGroups( $fingerPinkyChain, $inertJointNum, $left, $left, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+			$temp = createJointChainGroups( $fingerPinkyChain, $inertJointNum, $right, $right, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+		}
+	}
+		
+	//***create leg chain groups*******************************************************************
+	string $leftLegChain[];
+	int $leftLegSplitJointNum[];
+	if ( `checkBox -q -v skeletonBuilderToeCB` )
+	{	
+		$leftLegChain = { "root", "hip", "leg", "knee", "ankle", "ball" };	
+		$inertJointNum = getInsertJointNumber($leftLegChain);
+		$leftLegChain = createJointChainGroups( $leftLegChain, $inertJointNum, $middle, $left, $skeletonType );
+		$leftLegSplitJointNum = getSplitJointNumber($leftLegChain);	
+		stringArrayAppend($plusControl,$leftLegChain);	
+	}
+	else
+	{
+		$leftLegChain = { "root", "hip", "leg", "knee", "ankle", "ball", "toe" };
+		if ( $skeletonType == 2 )
+			$leftLegChain = { "root", "hip", "leg", "knee", "ankle", "ball", "toe", "toeEnd" };
+		$inertJointNum = getInsertJointNumber($leftLegChain);
+		$leftLegChain = createJointChainGroups( $leftLegChain, $inertJointNum, $middle, $left, $skeletonType );
+		$leftLegSplitJointNum = getSplitJointNumber($leftLegChain);	
+		stringArrayAppend($plusControl,$leftLegChain);	
+	}
+	
+	string $rightLegChain[];
+	int $rightLegSplitJointNum[];
+	if ( `checkBox -q -v skeletonBuilderToeCB` )
+	{	
+		$rightLegChain = { "root", "hip", "leg", "knee", "ankle", "ball" };	
+		$inertJointNum = getInsertJointNumber($rightLegChain);
+		$rightLegChain = createJointChainGroups( $rightLegChain, $inertJointNum, $middle, $right, $skeletonType );
+		$rightLegSplitJointNum = getSplitJointNumber($rightLegChain);	
+		stringArrayAppend($plusControl,$rightLegChain);	
+	}
+	else
+	{
+		$rightLegChain = { "root", "hip", "leg", "knee", "ankle", "ball", "toe" };
+		if ( $skeletonType == 2 )
+			$rightLegChain = { "root", "hip", "leg", "knee", "ankle", "ball", "toe", "toeEnd" };
+		$inertJointNum = getInsertJointNumber($rightLegChain);
+		$rightLegChain = createJointChainGroups( $rightLegChain, $inertJointNum, $middle, $right, $skeletonType );
+		$rightLegSplitJointNum = getSplitJointNumber($rightLegChain);	
+		stringArrayAppend($plusControl,$rightLegChain);	
+	}
+	
+	//***create toes chain groups*******************************************************************
+	if ( `checkBox -q -v skeletonBuilderToeCB` )
+	{		
+		if ( `checkBox -q -v skeletonBuilderThumbToeCB` )
+		{
+			string $toeTumbChain[] = { "ball", "toeThumbIn", "toeThumb1", "toeThumb2", "toeThumb3", "toeThumbEnd" };
+			$inertJointNum = getInsertJointNumber($toeTumbChain);	
+			$temp = createJointChainGroups( $toeTumbChain, $inertJointNum, $left, $left, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+			$temp = createJointChainGroups( $toeTumbChain, $inertJointNum, $right, $right, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+		}
+		
+		if ( `checkBox -q -v skeletonBuilderIndexToeCB` )
+		{
+			string $toeIndexChain[] = { "ball", "toeIndexIn", "toeIndex1", "toeIndex2", "toeIndex3", "toeIndexEnd" };
+			$inertJointNum = getInsertJointNumber($toeIndexChain);	
+			$temp = createJointChainGroups( $toeIndexChain, $inertJointNum, $left, $left, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+			$temp = createJointChainGroups( $toeIndexChain, $inertJointNum, $right, $right, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+		}
+		
+		if ( `checkBox -q -v skeletonBuilderMiddleToeCB` )
+		{
+			string $toeMiddleChain[] = { "ball", "toeMiddleIn", "toeMiddle1", "toeMiddle2", "toeMiddle3", "toeMiddleEnd" };
+			$inertJointNum = getInsertJointNumber($toeMiddleChain);	
+			$temp = createJointChainGroups( $toeMiddleChain, $inertJointNum, $left, $left, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+			$temp = createJointChainGroups( $toeMiddleChain, $inertJointNum, $right, $right, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+		}
+		
+		if ( `checkBox -q -v skeletonBuilderRingToeCB` )
+		{
+			string $toeRingChain[] = { "ball", "toeRingIn", "toeRing1", "toeRing2", "toeRing3", "toeRingEnd" };
+			$inertJointNum = getInsertJointNumber($toeRingChain);	
+			$temp = createJointChainGroups( $toeRingChain, $inertJointNum, $left, $left, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+			$temp = createJointChainGroups( $toeRingChain, $inertJointNum, $right, $right, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+		}
+		
+		if ( `checkBox -q -v skeletonBuilderPinkyToeCB` )
+		{
+			string $toePinkyChain[] = { "ball", "toePinkyIn", "toePinky1", "toePinky2", "toePinky3", "toePinkyEnd" };
+			$inertJointNum = getInsertJointNumber($toePinkyChain);	
+			$temp = createJointChainGroups( $toePinkyChain, $inertJointNum, $left, $left, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+			$temp = createJointChainGroups( $toePinkyChain, $inertJointNum, $right, $right, $skeletonType );
+			stringArrayAppend($plusControl,$temp);
+		}
+	}
+	
+	if ( `checkBox -q -v skeletonBuilderHeelCB` && $skeletonType == 1 )
+	{
+		string $toeHeelChain[] = { "ball", "heel", "heelEnd" };
+		$inertJointNum = getInsertJointNumber($toeHeelChain);	
+		$temp = createJointChainGroups( $toeHeelChain, $inertJointNum, $left, $left, $skeletonType );
+		stringArrayAppend($plusControl,$temp);
+		$temp = createJointChainGroups( $toeHeelChain, $inertJointNum, $right, $right, $skeletonType );
+		stringArrayAppend($plusControl,$temp);
+	}	
+
+
+	//*** Add split joint groups *******************************************************************
+	string $cmd;
+	int $totalSpineSplitNum = `intFieldGrp -q -v1 totalSpineSplitJointNumberIFG`;
+
+	//spine	
+	for ( $i = 0; $i < size($spineChain)-1; $i++ )			
+		$cmd += addSplitedGroups( $spineChain[$i], $spineSplitJointNum[$i]+$totalSpineSplitNum );	
+
+			
+	//jaw
+	if ( `checkBox -q -v skeletonBuilderJawCB` )
+	{
+		for ( $i = 0; $i < size($jawChain)-1; $i++ )			
+			$cmd += addSplitedGroups( $jawChain[$i], $jawSplitJointNum[$i]+$totalSpineSplitNum );		
+	}	
+	
+	//tail
+	if ( `checkBox -q -v skeletonBuilderTailCB` )
+	{
+		for ( $i = 0; $i < size($tailChain)-1; $i++ )			
+			$cmd += addSplitedGroups( $tailChain[$i], $tailSplitJointNum[$i]+$totalSpineSplitNum );		
+	}	
+	
+	int $totalArmSplitNum = `intFieldGrp -q -v1 totalArmSplitJointNumberIFG`;	
+	//arm	
+	for ( $i = 0; $i < size($leftArmChain)-1; $i++ )			
+		$cmd += addSplitedGroups( $leftArmChain[$i], $leftArmSplitJointNum[$i]+$totalArmSplitNum );
+	for ( $i = 0; $i < size($rightArmChain)-1; $i++ )			
+		$cmd += addSplitedGroups( $rightArmChain[$i], $rightArmSplitJointNum[$i]+$totalArmSplitNum );
+		
+	int $totalLegSplitNum = `intFieldGrp -q -v1 totalLegSplitJointNumberIFG`;	
+	//leg	
+	for ( $i = 0; $i < size($leftLegChain)-1; $i++ )			
+		$cmd += addSplitedGroups( $leftLegChain[$i], $leftLegSplitJointNum[$i]+$totalLegSplitNum );
+	for ( $i = 0; $i < size($rightLegChain)-1; $i++ )			
+		$cmd += addSplitedGroups( $rightLegChain[$i], $rightLegSplitJointNum[$i]+$totalLegSplitNum );
+	
+	
+	//create graph made of sphere and curve
+	createWireHierarchySkeleton( $gSkeletonBuilder_rigTmp );
+	
+	evalEcho $cmd;
+
+	addCurveControls( $globalCtrl, $plusControl);	
+	delete $gSkeletonBuilder_rigTmp;
+	select -cl;	
+}
+
+global proc mirrorTransform( string $sourceSide )
+{
+	global string $gSkeletonBuilder_rigNull;
+	global string $gSkeletonBuilder_rigControl;
+	
+	if ( !`objExists $gSkeletonBuilder_rigNull` || !`objExists $gSkeletonBuilder_rigNull` )
+		return;
+	
+	string $targetSide;	
+	if ( $sourceSide == "l_" )
+		$targetSide = "r_";		
+	if ( $sourceSide == "r_" )
+		$targetSide = "l_";
+	
+	string $sel[] = `listRelatives -c -typ transform $gSkeletonBuilder_rigControl`;	
+	if ( size($sel) != 0 )	
+	{		
+		for ( $i=0; $i<size($sel); $i++ )
+		{
+			string $tmp[] = `listRelatives -c -typ transform $sel[$i]`;
+			if ( `gmatch $tmp[0] ($sourceSide+"*")` )
+			{
+				float $pos[3] = `xform -q -ws -t $tmp[0]`;		
+				float $rot[3] = `xform -q -ws -ro $tmp[0]`;	
+				string $otherSideCtrl = `substitute $sourceSide $tmp[0] $targetSide`;			
+				xform -ws -t (-1*$pos[0]) $pos[1] $pos[2] $otherSideCtrl;
+				xform -ws -ro $rot[0] (-1*$rot[1]) (-1*$rot[2]) $otherSideCtrl;
+			}
+		}
+    }	
+	$sel = `listRelatives -c -typ transform $gSkeletonBuilder_rigNull`;	
+	if ( size($sel) != 0 )	
+	{		
+		for ( $i=0; $i<size($sel); $i++ )
+		{
+			string $tmp[] = `listRelatives -c -typ transform $sel[$i]`;
+			if ( `gmatch $tmp[0] ($sourceSide+"*")` )
+			{
+				//float $pos[3] = `getAttr ($tmp[0]+".t")`;	
+				float $pos[3] = `xform -q -ws -t $tmp[0]`;				
+				string $otherSideNull = `substitute $sourceSide $tmp[0] $targetSide`;
+				xform -ws -t (-1*$pos[0]) $pos[1] $pos[2] $otherSideNull;
+				//setAttr ($otherSideNull+".t") (-1*$pos[0]) $pos[1] $pos[2];
+			}
+		}
+    }
+}
+
+global proc g_skeletonBuilder_generateJoints()
+{	
+	global string $gSkeletonBuilder_rigTmp="Rig_Tmp";
+	global string $gSkeletonBuilder_rigGrp="Rig_Grp";	
+	global string $gSkeletonBuilder_rigCurve="Rig_Curve";
+	global string $gSkeletonBuilder_rigCluster="Rig_Cluster";
+	global string $gSkeletonBuilder_rigControl="Rig_Control";
+	global string $gSkeletonBuilder_rigNull="Rig_Null";
+	
+	if ( `objExists $gSkeletonBuilder_rigGrp` == false || `objExists $gSkeletonBuilder_rigNull` == false )
+		return;	
+	
+	select -cl;
+	string $prefixName =  `textFieldGrp -q -tx skeletonBuilderPrefixTFG`;
+	string $controlNulls[] = `ls -dag -ap -tr $gSkeletonBuilder_rigNull`;
+	string $limbHeads[];
+	int $limbHeadCount = 0;
+	for ( $controlNull in $controlNulls )
+	{
+		if ( !(`attributeExists "isLimbHead" $controlNull`) || 
+			 !(`attributeExists "parent" $controlNull`) 	 ||
+			 !(`attributeExists "child" $controlNull`	)		  ) 
+				continue;//if attribute not exist, skip it.
+		else
+		{
+			if ( `getAttr ( $controlNull + ".isLimbHead" )` == 1 )//get all head of limbs
+			{
+				$limbHeads[$limbHeadCount] = $controlNull;
+				$limbHeadCount++;
+			}				
+		}
+	}			
+	string $ortJoint = `optionMenuGrp -q -v skeletonBuilderJointOrientOMG`;
+	string $rotateOrder = `optionMenuGrp -q -v skeletonBuilderRotationOrderOMG`;
+	string $secAxOrt = `optionMenuGrp -q -v skeletonBuilderSecAxisOMG`;
+	string $jointName;
+	int $lableInfo[2];
+	float $position[3];	
+	for ( $limbHead in $limbHeads )
+	{
+		string $limbJointsList[];
+		clear $limbJointsList;		
+		int $index = 0;
+		$limbJointsList[$index] = $limbHead;
+		$index++;				
+		string $next = `getAttr ( $limbHead + ".child" )`;
+		while( $next != "Null")//find out all the joints on current limb
+		{					
+			$limbJointsList[$index] = $next;						
+			$next = `getAttr ( $next + ".child" )`;
+			$index++;
+		}
+		for ( $i = 0; $i < size($limbJointsList); $i++ )
+		{
+			clear $lableInfo;
+			clear $position;
+			$jointName = `substitute "Null" $limbJointsList[$i] ""`;
+			$jointName  = ($prefixName + $jointName+"_jnt");
+			$lableInfo = `FBIKLableLookup( $jointName)`;
+			$position = `xform -q -ws -t $limbJointsList[$i]`;					
+			joint -n $jointName -roo $rotateOrder -p $position[0] $position[1] $position[2];		
+			
+			if (`attributeExists "type" $jointName`)
+			{
+				string $tmp = `about -v`;
+				float $ver = `substring $tmp 1 1`;
+				if (  $ver < 7.0 && $lableInfo[1] > 18 )
+					$lableInfo[1] = 18;
+				setAttr ($jointName+".type") $lableInfo[1];	
+			}
+				
+			if (`attributeExists "side" $jointName`) 				
+				setAttr ($jointName+".side") $lableInfo[0];
+			if ( $i > 0 )
+			{
+				string $previousJointName = `substitute "Null" $limbJointsList[$i-1] ""`;
+				$previousJointName = ($prefixName + $previousJointName+"_jnt");
+				joint -e -ch -oj $ortJoint -secondaryAxisOrient $secAxOrt -zso $previousJointName;
+			}
+		}
+		select -cl;		//exit current joint limb creating state				
+	}
+	//parent each limb
+	for ( $limbHead in $limbHeads )
+	{
+		string $tmp = (`getAttr ( $limbHead + ".parent" )`);
+		if ( $tmp != "Null" )
+		{
+			string $parentJoint = `substitute "Null" $tmp ""`;
+			$parentJoint = ($prefixName + $parentJoint+"_jnt");
+			string $childJoint = `substitute "Null" $limbHead ""`;
+			$childJoint = ($prefixName + $childJoint+"_jnt") ;
+			parent $childJoint $parentJoint ;
+		}
+	}
+	
+	// Adjust jointOrient;
+	string $allJoint[] = `listRelatives -ad ($prefixName +"m_root_jnt")`;
+	for ( $joint in $allJoint )
+	{	
+		// Rotate z 180 for right side
+		if (`gmatch $joint "r_*"`)
+			rotate -r -os 0 0 180 ($joint+".rotateAxis");			
+			
+		// Rotate thumbs so that rotate -Y for all fingers will make fist gesture
+		if (`gmatch $joint "*fingerThumb*"`)
+			rotate -r -os -90 0 0 ($joint+".rotateAxis");
+			
+		// Change rotation order of elbow and wrist with "XZY"
+		if ( `gmatch $joint "*elbow*"` || 
+			`gmatch $joint "*hand*"` || 
+			`gmatch $joint "*shoulder*"` || 
+			`gmatch $joint "*spine*"` || 
+			`gmatch $joint "*chest*"` || 
+			`gmatch $joint "*neck*"` || 
+			`gmatch $joint "*jaw*"` || 
+			`gmatch $joint "*head*"` )
+			setAttr ($joint+".rotateOrder") 3;
+		setAttr ($prefixName + "m_root_jnt.rotateOrder") 3;
+
+	}	
+	select -cl;
+}
+
+global proc skeletonBuilder()
+{	
+	if (`window -ex skeletonBuilder`) 
+		deleteUI skeletonBuilder;
+	if (`windowPref -ex skeletonBuilder`)
+		windowPref -remove skeletonBuilder;
+	    
+	window -height 620 -width 250 -title "SOFA Skeleton Builder 2008" skeletonBuilder;
+	
+		columnLayout;
+		
+			optionMenuGrp -cw3 40 60 1 -label "Type" -extraLabel "" -columnWidth 2 60 
+			-cc ( "if(`optionMenuGrp -q -sl skeletonTypeOMG` == 1 ){checkBox -e -v 1 skeletonBuilderJawCB;checkBox -e -v 0 skeletonBuilderTailCB;checkBox -e -v 1 skeletonBuilderFingerCB;checkBox -e -v 0 skeletonBuilderToeCB;}if(`optionMenuGrp -q -sl skeletonTypeOMG` == 2 ){checkBox -e -v 1 skeletonBuilderJawCB;checkBox -e -v 1 skeletonBuilderTailCB;checkBox -e -v 0 skeletonBuilderFingerCB;checkBox -e -v 0 skeletonBuilderToeCB;}")
+			skeletonTypeOMG;
+				menuItem -label "Biped";
+				menuItem -label "Quadruped";
+
+
+			frameLayout -lv 0 -label "" -labelAlign "bottom" -borderStyle "etchedOut";  
+			
+				tabLayout -innerMarginWidth 5 -innerMarginHeight 5 skeletonBuilderOptionTL;
+				
+					string $child1 = `frameLayout -w 220 -h 290 -label "" -labelAlign "bottom" -borderStyle "in"`;				
+						columnLayout;
+						
+							text -l "Head Joint";
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 0 headInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 headSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;
+						
+							checkBox -label "Jaw Joint" -v 1 skeletonBuilderJawCB;
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 0 jawInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 jawSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;
+							
+							text -l "Neck Joint";
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 0 neckInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 neckSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;						
+			
+							text -l "Spine Joint";
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 0 spineInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 spineSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;
+							
+							checkBox -label "Tail Joint" -v 0 skeletonBuilderTailCB;
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 3 tailInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 tailSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;
+							
+							rowColumnLayout -nc 2 -cw 1 80 -cw 2 135;
+								text -l "";
+								intFieldGrp -cw2 105 30 -l "Total Split Number" -v1 0 totalSpineSplitJointNumberIFG;
+							setParent ..;
+							
+						setParent ..;
+				    setParent ..;			
+
+				    string $child2 = `frameLayout -w 220 -h 290 -label "" -labelAlign "bottom" -borderStyle "in"`;			
+						columnLayout;	
+						
+							text -l "Collar Joint";
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 0 collarInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 collarSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;
+							
+							text -l "Shoulder Joint";
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 0 shoulderInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 shoulderSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;
+							
+							text -l "Elbow Joint";
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 0 elbowInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 elbowSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;
+							
+							rowColumnLayout -nc 2 -cw 1 80 -cw 2 135;
+								text -l "";
+								intFieldGrp -cw2 105 30 -l "Total Split Number" -v1 0 totalArmSplitJointNumberIFG;
+							setParent ..;
+							
+							separator -w 220 -h 10;													
+							
+							checkBox -label "Finger Joint" -v 1 skeletonBuilderFingerCB;	
+							text -l "" -h 10;											
+							rowColumnLayout -nc 3 -cw 1 70 -cw 2 70 -cw 3 70;
+								checkBox -label "Thumb" -v true skeletonBuilderThumbCB;
+								checkBox -label "Index" -v true skeletonBuilderIndexCB;
+								checkBox -label "Middle" -v true skeletonBuilderMiddleCB;
+							setParent ..;
+							rowColumnLayout -nc 2 -cw 1 70 -cw 2 70;
+								checkBox -label "Ring" -v true skeletonBuilderRingCB;
+								checkBox -label "Pinky" -v true skeletonBuilderPinkyCB;
+							setParent ..;
+							
+					    setParent ..;
+					setParent ..;			
+						 
+					string $child3 = `frameLayout -w 220 -h 290 -label "" -labelAlign "bottom" -borderStyle "in"`;				
+						columnLayout;						
+
+							text -l "Hip Joint";
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 0 hipInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 hipSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;
+							
+							text -l "Leg Joint";
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 0 legInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 legSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;
+							
+							text -l "Knee Joint";
+							rowColumnLayout -nc 2 -cw 1 110 -cw 2 105;
+								intFieldGrp -cw2 80 30 -l "Insert Number" -v1 0 kneeInsertJointNumberIFG;
+								intFieldGrp -cw2 75 30 -l "Split Number" -v1 0 kneeSplitJointNumberIFG;								
+							setParent ..;
+							
+							separator -w 220 -h 10;
+							
+							rowColumnLayout -nc 2 -cw 1 80 -cw 2 135;
+								text -l "";
+								intFieldGrp -cw2 105 30 -l "Total Split Number" -v1 0 totalLegSplitJointNumberIFG;
+							setParent ..;
+							
+							separator -w 220 -h 10;	
+							
+							checkBox -label "Heel Joint" -v 0 skeletonBuilderHeelCB;
+							
+							separator -w 220 -h 10;													
+							
+							checkBox -label "Toe Joint" -v 0 skeletonBuilderToeCB;	
+							text -l "" -h 10;											
+							rowColumnLayout -nc 3 -cw 1 70 -cw 2 70 -cw 3 70 toeOption1;
+								checkBox -label "Thumb" -v 1 skeletonBuilderThumbToeCB;
+								checkBox -label "Index" -v 1 skeletonBuilderIndexToeCB;
+								checkBox -label "Middle" -v 1 skeletonBuilderMiddleToeCB;
+							setParent ..;
+							rowColumnLayout -nc 3 -cw 1 70 -cw 2 70 -cw 3 70 toeOption2;
+								checkBox -label "Ring" -v 1 skeletonBuilderRingToeCB;
+								checkBox -label "Pinky" -v 1 skeletonBuilderPinkyToeCB;
+								
+							setParent ..;	
+							
+					    setParent ..;
+					setParent ..;				
+
+				    tabLayout -edit -tabLabel $child1 "Spine" -tabLabel $child2 "Arm" -tabLabel $child3 "Leg" skeletonBuilderOptionTL;				
+				
+				setParent ..;
+		
+			setParent ..;
+			
+			
+			frameLayout -w 250 -label "Create template to fit 3D model" -labelAlign "bottom" -borderStyle "etchedOut";   	 
+			 columnLayout;
+				button -label "Step1 : Create Template" -w 237 -c createDefaultHierarchyGroups;
+				rowColumnLayout -nc 2 -cw 1 118 -cw 2 118;
+					button -label "Mirror >>" -c ("mirrorTransform r_");
+					button -label "Mirror <<" -c ("mirrorTransform l_");
+					setParent ..;	
+				setParent ..;
+				setParent ..;
+			frameLayout -w 250 -label "Create joints based on template" -labelAlign "bottom" -borderStyle "etchedOut";   	 
+			 columnLayout;			
+				optionMenuGrp -cw2 90 45 -label "Joint Orient" skeletonBuilderJointOrientOMG;
+	 	           menuItem -label "xyz";
+	 	           menuItem -label "yzx";
+	 	           menuItem -label "zxy";
+	 	           menuItem -label "xzy";
+	 	           menuItem -label "yxz";
+	 	           menuItem -label "zyx";
+				optionMenuGrp -cw2 90 45 -label "Rotation Order" skeletonBuilderRotationOrderOMG;
+	 	           menuItem -label "xyz";
+	 	           menuItem -label "yzx";
+	 	           menuItem -label "zxy";
+	 	           menuItem -label "xzy";
+	 	           menuItem -label "yxz";
+	 	           menuItem -label "zyx";
+				optionMenuGrp -cw2 90 45 -label "Second Axis" skeletonBuilderSecAxisOMG;				
+	 	           menuItem -label "xup";
+	 	           menuItem -label "xdown";
+	 	           menuItem -label "yup";
+	 	           menuItem -label "ydown";
+	 	           menuItem -label "zup";
+	 	           menuItem -label "zdown";
+				   menuItem -label "none";
+				optionMenuGrp -e -sl 5 skeletonBuilderSecAxisOMG;	
+	 	        
+				textFieldGrp -cw2 90 50 -l "Prefix Name" -tx "" skeletonBuilderPrefixTFG;
+				floatSliderGrp -cw 1 90 -cw 2 50 -cw 3 50 -label "JointDisplayScale" 
+				-field true 
+				-minValue 0.01 -maxValue 5
+				-fieldMinValue 0.01 -fieldMaxValue 10 
+				-pre 2
+				-ss 0.1
+				-dc ("float $v = `floatSliderGrp -q -v jointDisplayScaleFSG`;eval(\"jointDisplayScale \"+$v);")
+				-cc ("float $v = `floatSliderGrp -q -v jointDisplayScaleFSG`;eval(\"jointDisplayScale \"+$v);")
+				-value 0.1 jointDisplayScaleFSG;
+				button -label "Step2 : Create Skeleton" -w 237 -c g_skeletonBuilder_generateJoints;
+				button -label "Step3 : Clean Template" -w 237 -c "if ( `objExists \"Rig_Grp\"`){delete \"Rig_Grp\";}";
+				setParent ..;
+			setParent ..;			
+		
+	setParent ..;		
+
+	showWindow;
+
+}
+
+proc printJointPosition()
+{
+	// This proc is for printing out the joint's position for whole skeleton
+	// It is useful to expend the skeleton library in the future
+	string $sel[] = `ls -sl -type joint`;
+	if ( size($sel) != 0 )
+	{
+		string $joints[] = `listRelatives -ad -type joint $sel[0]`;
+		$joints[size($joints)] = $sel[0];
+		for ( $joint in $joints )		
+		{
+			float $pos[3] = `xform -q -ws -t $joint`;
+			$pos[0] = floor($pos[0]*1000.0)/1000.0;
+			$pos[1] = floor($pos[1]*1000.0)/1000.0;
+			$pos[2] = floor($pos[2]*1000.0)/1000.0;
+			print ("case \""+$joint+"\": $data = { "+$pos[0]+", "+$pos[1]+", "+$pos[2]+" }; break;\n" );
+		}		
+	}
+}
+	
+	
+
+
+
+
+
+

@@ -1,0 +1,58 @@
+//GUI for rotating the local rotation axis of a Joint or object,		v1.3		12/30/1999
+//regardless of selection mode.
+//
+//Written by Cid Newman (cnewman@retrostudios.com)
+
+global proc cnSpinAxis()
+{
+if (`window -ex cnSpinner`) floatField -e -v 90 cnSpinField;
+
+else
+   {
+    window -wh 112 123 -t "Spin Axis" cnSpinner;
+    columnLayout -cat "both" 5 -rs 10 -cw 100 -cal "center";
+    floatField -w 100 -v 90 -min -180 -max 180 -pre 2 cnSpinField;
+    radioButtonGrp - nrb 3  - sl 1-cw 1 30 -cw 2 30 -labelArray3 "X" "Y" "Z"  cnAxis;
+    button -l "Set" -c cnSpinAxis2;
+	
+	button -l "Show local axis" -c "cnSpinShowAxis 1";
+	button -l "Hide local axis" -c "cnSpinShowAxis 0";
+    }
+showWindow cnSpinner;
+}
+global proc cnSpinShowAxis( int $displaymode )
+
+{
+    string $sel[] = `ls -sl -l`;
+    for($obj in $sel)
+    {
+        setAttr ($obj+".displayLocalAxis") $displaymode;          
+    }
+}
+global proc cnSpinAxis2()
+{
+string $selected[] = `ls -sl`;
+int $howMany = size($selected);
+string $object;
+string $checkSelect[];
+
+if ($howMany < 1)$selected = `ls -hl`;
+
+string $current = $selected[0];
+
+if ((`tokenize $current "." $checkSelect`) > 1) $object = $current;
+else $object = ($current + ".rotateAxis");
+
+float $xValue = 0;
+float $yValue = 0;
+float $zValue = 0;
+
+float $rotAmount = `floatField -q -v cnSpinField`;
+int $axis = `radioButtonGrp -q -sl  cnAxis`;
+
+if ($axis == 1) $xValue = $rotAmount;
+if ($axis == 2) $yValue = $rotAmount;
+if ($axis == 3) $zValue = $rotAmount;
+
+rotate -r -os $xValue $yValue $zValue  $object;
+}

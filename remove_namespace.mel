@@ -1,0 +1,62 @@
+{
+ string $allNodes[] = `ls -l`;
+
+string $allNamespaceNodes[];
+
+for($each in $allNodes)
+{
+      if(`gmatch $each "*:*"` && (`nodeType $each` != "reference") && (!`referenceQuery -isNodeReferenced $each`))
+         $allNamespaceNodes[size($allNamespaceNodes)] = $each;
+ 
+}
+
+int $nodeLevel[];
+
+int $maxLevel=-1;
+int $index = 0;
+for($each in $allNamespaceNodes)
+{
+     string $tokens[];
+     int $numToken =tokenize($each,"|",$tokens);
+     $nodeLevel[$index] = $numToken;
+     if($numToken > $maxLevel)
+         $maxLevel = $numToken;
+     $index+=1;
+}
+
+ print("nodes to be renamed: "+size($allNamespaceNodes)+"\n");
+
+int $index = $maxLevel;
+while($index>=1)
+{
+     int $index2=0;
+     for($each in $allNamespaceNodes)
+     {
+         if($nodeLevel[$index2] == $index)
+         {
+             if((`nodeType $each` != "reference") && (!`referenceQuery -isNodeReferenced $each`))
+             {
+                 string $tokens[];
+                 int $numToken = tokenize($each,":",$tokens);
+                 string $shortName = $tokens[$numToken-1];
+             
+                 int $index=1;
+                 string $newName = $shortName;
+                 while(`objExists $newName`)
+                 {
+                     $newName = $shortName+$index;
+                     $index+=1;
+                 }
+                 print ($each+" -> ");
+                 string $result;
+                 string $command = "rename "+$each+" "+$newName;
+                 int $test = catch( $result = eval($command));
+                 print ($result+"\n");
+             }
+         }
+     
+         $index2+=1;
+     }
+     $index-=1;
+}
+}

@@ -1,0 +1,3604 @@
+//  sofa_rig.mel
+//  Version 1.0
+//  NO: rig0008
+//
+//
+//  Copyright (C) 2008 SOFA Studio  http://www.sofastudio.com
+//
+//  Creation Date:  Sep 2008
+//
+//  Modefied Date:
+//
+//  Written By:	Jack Yu
+//
+// Modified noted :
+// 2020/01/05 Change IK control's orientation to align world instead of local.(line : 2667, 3065)
+
+/*
+The DAG organization and folder structure of character rig file look like this :
+
+	all
+		transformA
+			transformB
+				transformC
+					deformer.............................all stuff responsible for envelope or deforme the appreance of geometry
+						facial
+						body					
+					rig..................................all rig stuff like IK Handle, cluster, curve, loator... are put here, group by parts
+					geometry..........................all renderable geometry
+					control
+					textrue
+					
+*/
+
+proc float[] sofa_rig_getRotationFromChildJointDirection( string $joint )
+{
+	float $rot[3] = { 0, 0, 0 };
+	
+	if( !`objExists $joint` )
+		return $rot;
+	
+	string $tmp[] = `listRelatives -c $joint`;
+	if ( size($tmp) != 1 )
+		return $rot;
+
+	float $p1[3] = `xform -q -ws -t $joint`;
+	float $p2[3] = `xform -q -ws -t $tmp[0]`;
+	float $p3[3] = { $p2[0]-$p1[0], $p2[1]-$p1[1], $p2[2]-$p1[2] };
+	
+	string $axis = "+y";
+	if ( abs($p3[0]) > abs($p3[1]) && abs($p3[0]) > abs($p3[2]) )
+	{
+		$axis = "+x";
+		if ( $p3[0] < 0 )
+			$axis = "-x";
+	}
+	if ( abs($p3[1]) > abs($p3[1]) && abs($p3[1]) > abs($p3[0]) )
+	{
+		$axis = "+y";
+		if ( $p3[1] < 0 )
+			$axis = "-y";
+	}
+	if ( abs($p3[2]) > abs($p3[1]) && abs($p3[2]) > abs($p3[0]) )
+	{
+		$axis = "+z";
+		if ( $p3[2] < 0 )
+			$axis = "-z";
+	}	
+	switch ($axis)
+	{
+		case "+x": $rot = { 0, 0, -90 }; break;
+		case "-x": $rot = { 0, 0, 90 }; break;
+		case "+y": $rot = { 0, 0, 0 }; break;
+		case "-y": $rot = { 0, 0, 180 }; break;
+		case "+z": $rot = { 90, 0, 0 }; break;
+		case "-z": $rot = { -90, 0, 0 }; break;
+		default : $data = { 0, 0, 0 }; break;
+	}	
+	return $rot;
+}
+
+proc sofa_rig_alignAndAttach( string $origin, string $target, int $align, int $attach )
+{
+	if($align)
+	{
+		string $tmp[] = `orientConstraint -offset 0 0 0 -weight 1 $target $origin`;
+		delete $tmp[0];
+	}	
+	if($attach)
+	{
+		string $tmp[] = `pointConstraint -offset 0 0 0 -weight 1 $target $origin`;
+		delete $tmp[0];
+	}
+}
+
+proc sofa_rig_createSet ( string $setArray, string $control )
+{	
+	if( $setArray != "" )
+	{
+		select -cl;	
+		string $cleanSet = "m_ctl_set";
+		string $setList[] = {	"m_bodyCtl_set",
+								"m_ikCtl_set",
+								"m_fkCtl_set",
+								"l_armCtl_set",
+								"r_armCtl_set",
+								"l_legCtl_set",
+								"r_legCtl_set",
+								"m_torsoCtl_set",
+								"m_facialCtl_set",
+								"m_eyeCtl_set", 
+								"m_lipSyncCtl_set", 
+								"m_mouthCtl_set"	};
+		
+		if ( !`objExists $cleanSet` )
+			sets -n $cleanSet;
+
+		for ( $set in $setList )
+		{	
+			if ( !`objExists $set` ) 
+			{	
+				sets -n $set;
+				sets -e -forceElement $cleanSet $set;		
+			}
+		}
+		
+		string $collectSet[] = stringToStringArray( $setArray, " ");
+		for ( $set in $collectSet )
+		{	
+			if ( $set != "" ) 
+			{
+				if ( !`objExists $set` ) 
+				{	
+					sets -n $set;
+					sets -e -forceElement $cleanSet $set;	
+				}
+				else
+					sets -e -forceElement $set $control;
+			}
+		}
+	}	
+}
+
+proc sofa_rig_templateExistanceCheck()
+{
+	global string $gTemplateAll, $gTemplateSkeleton, $gTemplateControl, $gTemplateRig;
+	
+	if( !`objExists $gTemplateAll` )
+		error ("Can't find object "+$gTemplateAll+".");
+	if( !`objExists $gTemplateSkeleton` )
+		error ("Can't find object "+$gTemplateSkeleton+".");
+	if( !`objExists $gTemplateControl` )
+		error ("Can't find object "+$gTemplateControl+".");
+	if( !`objExists $gTemplateRig` )
+		error ("Can't find object "+$gTemplateRig+".");
+}
+		
+proc sofa_rig_reverseBlend ( string $control, string $blendAttr, int $defaultValue, string $ReverseNode, string $directOutAttr, string $reverseOutAttr )
+{	
+	addAttr -ln $blendAttr -at double -dv $defaultValue -min 0 -max 1 $control;
+	setAttr -e -keyable true ($control+"."+$blendAttr);	
+	string $ReverseNode = `shadingNode -n $ReverseNode -asUtility reverse`;
+	connectAttr -f ($control+"."+$blendAttr) ($ReverseNode+".inputX");	
+	connectAttr -f ($control+"."+$blendAttr) $directOutAttr;
+	connectAttr -f ($ReverseNode+".outputX") $reverseOutAttr;
+}
+
+proc string sofa_rig_getRealRootControl( string $rootControl )
+{
+	// By moving pivot of control, the constrains will be affected, so we need a real root control parent under root control and use it as the real constrains target
+	return ($rootControl+"_real");
+}
+
+proc float sofa_rig_getDistance( string $obj1, string $obj2 )
+{
+	if ( !`objExists $obj1`)
+		error ($obj1+" doesn't exist.");
+	if ( !`objExists $obj2`)
+		error ($obj2+" doesn't exist.");
+		
+	float $p1[3] = `xform -q -ws -t $obj1`;
+	float $p2[3] = `xform -q -ws -t $obj2`;
+	return sqrt(($p2[0]-$p1[0])*($p2[0]-$p1[0])+($p2[1]-$p1[1])*($p2[1]-$p1[1])+($p2[2]-$p1[2])*($p2[2]-$p1[2]));
+}
+
+proc sofa_createIKSplineStretch( string $IKSplineHandle, string $globalScaleAttr, int $isYZScaled )  //$globalScaleAttr is a single channel attr EX: root.scaleX
+{
+	// Create IK Spline stretch
+	string $result = `ikHandle -q -curve $IKSplineHandle`;
+	string $curveInfo = `arclen -ch 1 $result`;
+	float $arcLength = `getAttr ($curveInfo+".arcLength")`;
+	string $arcLengthDivide = `createNode -n ($IKSplineHandle + "_arcLength_Divide") multiplyDivide`;
+	setAttr ($arcLengthDivide + ".operation") 2;		
+	string $multDoubleLinear1 = `createNode -n ($IKSplineHandle+"_stretch_global _multiply") multDoubleLinear`;
+	// The root's scale must be considered as a input factor
+	connectAttr $globalScaleAttr ($multDoubleLinear1 + ".input2");  
+	setAttr ($multDoubleLinear1 + ".input1") $arcLength;		
+	connectAttr ($multDoubleLinear1 + ".output") ($arcLengthDivide + ".input2X");
+	connectAttr ($curveInfo + ".arcLength") ($arcLengthDivide + ".input1X");   
+	
+	string $scaleDivide;
+	if($isYZScaled)
+	{
+		// Create node to caculate Y,Z scale caused by stretch
+		$scaleDivide = `shadingNode -asUtility multiplyDivide`;
+		setAttr ($scaleDivide+".operation") 2;
+		setAttr ($scaleDivide+".input1X") 1;
+		connectAttr ($arcLengthDivide + ".outputX") ($scaleDivide + ".input2X"); 
+	}
+	
+	string $jointList[] = `ikHandle -q -jl $IKSplineHandle`;
+	for ( $i = 0; $i < size($jointList)-1; $i++ )
+	{	
+		float $jointLength = sofa_rig_getDistance ( $jointList[$i], $jointList[$i+1] );
+		string $multDoubleLinear = `createNode -n ($jointList[$i] + "_ikspline_stretch_multiply") multDoubleLinear`;
+		connectAttr ($arcLengthDivide + ".outputX") ($multDoubleLinear + ".input1");  
+		setAttr ($multDoubleLinear + ".input2") $jointLength;		
+		connectAttr ($multDoubleLinear + ".output") ($jointList[$i+1] + ".tx");	
+		if($isYZScaled)
+		{
+			connectAttr ($scaleDivide + ".outputX") ($jointList[$i+1] + ".sy");
+			connectAttr ($scaleDivide + ".outputX") ($jointList[$i+1] + ".sz");	
+		}
+	}		
+}
+	
+proc float sofa_rig_getLinearUnitConversion()
+{
+	//Description: Returns a  conversion factor based on the Maya current linear units.
+	string $currentUnits = `currentUnit -q -l`;
+	float $conversionFactor;
+
+	if ($currentUnits == "mm")
+		$conversionFactor = 10;
+	else if ($currentUnits == "cm")
+		$conversionFactor = 1;
+	else if ($currentUnits == "m")
+		$conversionFactor = 0.01;
+	else if ($currentUnits == "km")
+		$conversionFactor = 0.0001;
+	else if ($currentUnits == "in")
+		$conversionFactor = 0.393701;
+	else if ($currentUnits == "ft")
+		$conversionFactor = 0.0328084;
+	else if ($currentUnits == "yd")
+		$conversionFactor = 0.0109361;
+	else if ($currentUnits == "mi")
+		$conversionFactor = 6.21371e-06;
+
+	return $conversionFactor;
+}
+
+proc sofa_rig_setLockAttributes(int $isLock, string $object, string $attributes)
+{
+	if (! `objExists $object`)
+		return;
+
+	string $attributeArray[];
+	tokenize $attributes $attributeArray;
+	
+	int $value = 0;
+	if ( $isLock > 0)
+		$value = 1;
+
+	for ($attribute in $attributeArray)	
+		setAttr -lock $value ($object + "." + $attribute);
+}
+
+proc sofa_rig_setHideAttributes(int $isHide, string $object, string $attributes)
+{
+	if (! `objExists $object`)
+		return;
+
+	string $attributeArray[];
+	tokenize $attributes $attributeArray;
+	
+	int $value = 1;
+	if ( $isHide > 0)
+		$value = 0;
+
+	for ($attribute in $attributeArray)	
+		setAttr -keyable $value -channelBox $value ($object + "."+$attribute);
+}
+
+proc string sofa_rig_getPrefixName( int $side )
+{
+	string $prefix = "m_";
+	if ( $side == 1 )
+		$prefix = "L_";
+	if ( $side == 2 )
+		$prefix = "R_";
+		
+	global int $useNewNamingRule;
+	if($useNewNamingRule)	
+		$prefix = tolower($prefix);
+	
+	return $prefix;
+}
+
+proc string sofa_rig_createCurve ( string $controlName, int $type, float $size )
+{
+	//control type:
+	// 1. circle
+	//2.  double arrow
+	//3.  cubic
+	//4.  double arrow with 90 deg rotate
+	//5.  ankle curve
+	//6.  ball curve
+	//7. IK leg
+	//8. IK SPline chest
+	//9. COG wrist control
+	//10. spine control
+	//11. onObj curve
+	//12. Root curve
+	//13. locator shape
+	//14. finger control
+	string $tmp[];
+	
+	switch ($type)
+	{ 
+	    //case 1: $tmp = `circle  -n $controlName -c 0 0 0 -nr 1 0 0 -sw 360 -r $size -d 3 -ut 0 -tol 0.01 -s 8 -ch 0`; break; 
+		case  1: $tmp[0] = `curve -n $controlName -d 3 -p 0.08574579234 0.002894727744 0.9374805201 -p 0.08574732384 0.001929820908 0.9374826234 -p 0.08598892188 -0.3017989222 0.937813819 -p -0.06538462319 -0.9082914979 0.7303028232 -p -0.08598892188 -1.14596529 -0.01996541244 -p -0.06538462319 -0.9082914979 -0.7702336481 -p 0.08576808427 -0.3026837292 -0.937813819 -p 0.08574807551 -1.903989755e-017 -0.9377916357 -p 0.08576808427 0.3026837292 -0.937813819 -p -0.06538462319 0.9082914979 -0.7702336481 -p -0.08598892188 1.14596529 -0.01996541244 -p -0.06538462319 0.9082914979 0.7303028232 -p 0.08598892188 0.3017989222 0.937813819 -p 0.08574732384 -0.001929820908 0.9374826234 -p 0.08574579234 -0.002894727744 0.9374805201`; break;
+	    case  2: $tmp[0] = `curve -n $controlName -d 1 -p -0.4462985 0.01369525 -0.00223102 -p -0.5254865 0.05589125 -0.00254208 -p -0.5144645 -0.26049415 -0.00105019 -p -0.2692995 -0.08062075 -0.00126068 -p -0.3570485 -0.03386275 -0.00175448 -p -0.3354085 -0.00141675 -0.00179493 -p -0.2766065 0.06581725 -0.00195693 -p -0.2016515 0.11915325 -0.00201371 -p -0.1166225 0.15297725 -0.00195469 -p -0.0275564 0.16613925 -0.00178985 -p 0.063223 0.15849125 -0.0015244 -p 0.1507365 0.12916325 -0.00116693 -p 0.2272705 0.08132725 -0.000751673 -p 0.2932305 0.01501125 -0.000277721 -p 0.3269245 -0.02760775 4.93783e-006 -p 0.2502895 -0.07421075 2.64962e-005 -p 0.5254865 -0.26675725 0.0016144 -p 0.4951545 0.07469525 -4.23875e-005 -p 0.4094035 0.02254825 -0.0002638 -p 0.3681465 0.08149525 -0.000395433 -p 0.2900445 0.16001725 -0.000956629 -p 0.1937185 0.22022525 -0.00147929 -p 0.0835994 0.25712725 -0.00192908 -p -0.0307088 0.26675725 -0.00226333 -p -0.1427625 0.25019925 -0.00247071 -p -0.2498095 0.20761725 -0.00254501 -p -0.3441505 0.14048725 -0.00247355 -p -0.4193325 0.05452125 -0.00226641 -p -0.4462985 0.01369525 -0.00223102`; break;
+		case  3: $tmp[0] = `curve -n $controlName -d 1 -p -0.5 0.5 0.5 -p 0.5 0.5 0.5 -p 0.5 0.5 -0.5 -p -0.5 0.5 -0.5 -p -0.5 0.5 0.5 -p -0.5 -0.5 0.5 -p 0.5 -0.5 0.5 -p 0.5 0.5 0.5 -p 0.5 0.5 -0.5 -p 0.5 -0.5 -0.5 -p 0.5 -0.5 0.5 -p -0.5 -0.5 0.5 -p -0.5 -0.5 -0.5 -p 0.5 -0.5 -0.5 -p -0.5 -0.5 -0.5 -p -0.5 0.5 -0.5 -p -0.5 0.5 0.5 -p -0.5 -0.5 0.5 -k 0 -k 1 -k 2 -k 3 -k 4 -k 5 -k 6 -k 7 -k 8 -k 9 -k 10 -k 11 -k 12 -k 13 -k 14 -k 15 -k 16 -k 17`; break;
+		case  4: $tmp[0] = `curve -n $controlName -d 1 -p 0.01369525 0.4462985 -0.001765715 -p 0.05589125 0.5254865 -0.002076775 -p -0.26049415 0.5144645 -0.000584885 -p -0.08062075 0.2692995 -0.000795375 -p -0.03386275 0.3570485 -0.001289175 -p -0.00141675 0.3354085 -0.001329625 -p 0.06581725 0.2766065 -0.001491625 -p 0.11915325 0.2016515 -0.001548405 -p 0.15297725 0.1166225 -0.001489385 -p 0.16613925 0.0275564 -0.001324545 -p 0.15849125 -0.063223 -0.001059095 -p 0.12916325 -0.1507365 -0.000701625 -p 0.08132725 -0.2272705 -0.000286368 -p 0.01501125 -0.2932305 0.000187584 -p -0.02760775 -0.3269245 0.00047024283 -p -0.07421075 -0.2502895 0.0004918012 -p -0.26675725 -0.5254865 0.002079705 -p 0.07469525 -0.4951545 0.0004229175 -p 0.02254825 -0.4094035 0.000201505 -p 0.08149525 -0.3681465 6.9872e-005 -p 0.16001725 -0.2900445 -0.000491324 -p 0.22022525 -0.1937185 -0.001013985 -p 0.25712725 -0.0835994 -0.001463775 -p 0.26675725 0.0307088 -0.001798025 -p 0.25019925 0.1427625 -0.002005405 -p 0.20761725 0.2498095 -0.002079705 -p 0.14048725 0.3441505 -0.002008245 -p 0.05452125 0.4193325 -0.001801105 -p 0.01369525 0.4462985 -0.001765715`; break;
+		case  5: $tmp[0] = `curve -n $controlName -d 3 -p -0.004087057573 0.3336599085 0.7250978084 -p 0.09999838746 0.3339256523 0.7259203248 -p 0.3041529907 0.29033344 0.6509946863 -p 0.4583719567 0.0794327867 0.4605956907 -p 0.5534737932 -0.1275468304 0.2830197735 -p 0.6002350032 -0.3339256523 -0.00024865855 -p 0.5529464937 -0.1273392048 -0.2840438549 -p 0.4596683719 0.07891691028 -0.4608683339 -p 0.3069094126 0.2842947155 -0.6460957159 -p 0.1139010058 0.3303388335 -0.7219013593 -p 5.20893101e-005 0.3325945355 -0.7259203248 -p -0.1139010058 0.3303388335 -0.7219013593 -p -0.3069094126 0.2842947155 -0.6460957159 -p -0.4596683719 0.07891691028 -0.4608683339 -p -0.5529464937 -0.1273392048 -0.2840438549 -p -0.6002350032 -0.3339256523 -0.00024865855 -p -0.5534737932 -0.1275468304 0.2830197735 -p -0.4583719567 0.0794327867 0.4605956907 -p -0.3041529907 0.29033344 0.6509946863 -p -0.09999838746 0.3339256523 0.7259203248 -p 0.002728072493 0.33366722 0.7251151404`; break; 
+		case  6: $tmp[0] = `curve -n $controlName -d 3 -p -0.0003450236735 -0.3424390653 0 -p -0.0002300157936 -0.3424390653 0 -p 0.162316118 -0.3424390635 0 -p 0.4872933776 -0.3424441421 0 -p 0.6891369035 -0.2302982131 0 -p 0.4940214951 0.1926254067 0 -p 0.1786742385 0.3350432128 0 -p -2.220446049e-016 0.3424441421 0 -p -0.1786742385 0.3350432128 0 -p -0.4940214951 0.1926254067 0 -p -0.6891369035 -0.2302982131 0 -p -0.4872933776 -0.3424441421 0 -p -0.162316118 -0.3424390635 0 -p 0.0002300157936 -0.3424390653 0`; break;  
+		case  7: $tmp[0] = `curve -n $controlName -d 3 -p 0.280810415 -0.3597560108 -0.83308883 -p 0.2579821178 -0.3597560108 -1.047624895 -p 0.2190749424 -0.3597560108 -1.300352083 -p 0.1863964485 -0.06032096848 -1.313376491 -p 0.1275712713 0.1753904901 -1.290738629 -p 0.0571751048 0.320422926 -1.245932921 -p -0.07432698081 0.3597560108 -1.244365455 -p -0.1844229222 0.320422926 -1.248152947 -p -0.2654759425 0.1879443549 -1.288663852 -p -0.365081556 -0.04363371518 -1.314013589 -p -0.4385632463 -0.3476244463 -1.300876359 -p -0.4037885383 -0.3597560108 -1.060111705 -p -0.3447384962 -0.3597560108 -0.4999712249 -p -0.3146265924 -0.3597560108 -0.222625701 -p -0.4033295076 -0.3597560108 0.1852662999 -p -0.4615566488 -0.3597560108 0.5839137699 -p -0.3088200386 -0.3597560108 1.131728165 -p -0.1656458842 -0.3556818796 1.29547298 -p -0.1379597333 -0.260320592 1.314013589 -p -0.3417366877 -0.1370732874 0.999125856 -p -0.01615305811 -0.1234990807 0.8272765609 -p 0.3672130321 -0.1370732874 0.9971878579 -p 0.1069577688 -0.260320592 1.30235683 -p 0.1322913333 -0.3515145102 1.285063724 -p 0.3064949987 -0.3597560108 1.123651936 -p 0.4615566488 -0.3597560108 0.663580131 -p 0.3985805954 -0.3597560108 -0.01900172305 -p 0.2944427834 -0.3597560108 -0.5805836222 -p 0.2814006678 -0.3597560108 -0.834439225`; break; 
+		case  8: $tmp[0] = `curve -n $controlName -d 3 -p -0.001950093943 -0.05822668414 -1.439560162 -p -0.2333528738 -0.05791862945 -1.439737518 -p -0.6970160696 0.009569573346 -1.477779378 -p -1.177270967 1.303741269 -1.171663554 -p -1.359578176 1.428830522 -0.4302285595 -p -1.177270967 1.195888884 0.1640236007 -p -0.6970025161 -0.02212601845 0.9986436575 -p 0 -0.06874173595 1.228012271 -p 0.6970025161 -0.02212601845 0.9986436575 -p 1.177270967 1.195888884 0.1640236007 -p 1.359578176 1.428830522 -0.4302285595 -p 1.177270967 1.303741269 -1.171663554 -p 0.6970160696 0.009569573346 -1.477779378 -p 0.2333528738 -0.05791862945 -1.439737518 -p 0.001950093943 -0.05822668414 -1.439560162`; break; 
+		case  9: $tmp[0] = `curve -n $controlName -d 1 -p 0.4921952832 -0.3319860926 -1.469821407 -p 0.4921952832 -0.3504981373 -1.607355072 -p 0.4921952832 -0.369010182 -1.744888737 -p 0.4921952832 -0.3875222268 -1.882422402 -p 0.6082182019 -0.3784520264 -1.882422402 -p 0.7242411206 -0.369381826 -1.882422402 -p 0.8402640392 -0.3603116256 -1.882422402 -p 0.5601759443 -0.3843783455 -2.157489732 -p 0.2800878493 -0.4084450654 -2.432557062 -p -2.457213504e-007 -0.4325117852 -2.707624391 -p -0.2800883407 -0.4084450654 -2.432557062 -p -0.5601764357 -0.3843783455 -2.157489732 -p -0.8402645307 -0.3603116256 -1.882422402 -p -0.724241612 -0.369381826 -1.882422402 -p -0.6082186933 -0.3784520264 -1.882422402 -p -0.4921957747 -0.3875222268 -1.882422402 -p -0.4921957747 -0.369010182 -1.744888737 -p -0.4925353556 -0.332929501 -1.470746227 -p -0.6874988686 -0.3098786751 -1.409292825 -p -0.8705911802 -0.2833090559 -1.32221093 -p -1.040721418 -0.2468365395 -1.215376333 -p -1.195312335 -0.2094605869 -1.090393474 -p -1.332066342 -0.1736684219 -0.9491271982 -p -1.448942956 -0.1458349056 -0.79367706 -p -1.544186938 -0.1251404616 -0.6263979167 -p -1.611237122 -0.1097321233 -0.4486742719 -p -1.911247612 -0.08598786163 -0.4487496306 -p -2.06182358 -0.07441162183 -0.4487496306 -p -2.06182358 -0.07441162183 -0.5547230969 -p -2.06182358 -0.07441162183 -0.6606965633 -p -2.06182358 -0.07441162183 -0.7666700296 -p -2.362975515 -0.07441162183 -0.5108420721 -p -2.66412745 -0.07441162183 -0.2550141147 -p -2.965279384 -0.07441162183 0.0008138428237 -p -2.66412745 -0.07441162183 0.2566418003 -p -2.362975515 -0.07441162183 0.5124697578 -p -2.06182358 -0.07441162183 0.7682977153 -p -2.06182358 -0.07441162183 0.6623242489 -p -2.06182358 -0.07441162183 0.5563507826 -p -2.06182358 -0.07441162183 0.4503773163 -p -1.911247612 -0.08598786163 0.4503773163 -p -1.611108198 -0.1097601356 0.450687484 -p -1.543827177 -0.12521863 0.6287640185 -p -1.448487314 -0.1459339066 0.7959975888 -p -1.331521604 -0.1738764247 0.9513918098 -p -1.194686634 -0.2096769734 1.092592664 -p -1.040024093 -0.2470580808 1.217501574 -p -0.8698326349 -0.2834269299 1.324254791 -p -0.6866904285 -0.3099881241 1.411249112 -p -0.4921132697 -0.3329790714 1.47249167 -p -0.4921957747 -0.369010182 1.746516423 -p -0.4921957747 -0.3875222268 1.884050088 -p -0.6082186933 -0.3784520264 1.884050088 -p -0.724241612 -0.369381826 1.884050088 -p -0.8402645307 -0.3603116256 1.884050088 -p -0.5601764357 -0.3843783455 2.159117417 -p -0.2800883407 -0.4084450654 2.434184747 -p -2.457213477e-007 -0.4325117852 2.709252077 -p 0.2800878493 -0.4084450654 2.434184747 -p 0.5601759443 -0.3843783455 2.159117417 -p 0.8402640392 -0.3603116256 1.884050088 -p 0.7242411206 -0.369381826 1.884050088 -p 0.6082182019 -0.3784520264 1.884050088 -p 0.4921952832 -0.3875222268 1.884050088 -p 0.4921952832 -0.369010182 1.746516423 -p 0.4925348641 -0.332929501 1.472373913 -p 0.6874983771 -0.3098786751 1.410920511 -p 0.8705906888 -0.2833090559 1.323838615 -p 1.040720927 -0.2468365395 1.217004019 -p 1.195311843 -0.2094605869 1.09202116 -p 1.332065851 -0.1736684219 0.9507548839 -p 1.448942465 -0.1458349056 0.7953047457 -p 1.544186447 -0.1251404616 0.6280256023 -p 1.61123663 -0.1097321233 0.4503019575 -p 1.911247121 -0.08598786163 0.4503773163 -p 2.061823088 -0.07441162183 0.4503773163 -p 2.061823088 -0.07441162183 0.5563507826 -p 2.061823088 -0.07441162183 0.6623242489 -p 2.061823088 -0.07441162183 0.7682977153 -p 2.362975023 -0.07441162183 0.5124697578 -p 2.664126958 -0.07441162183 0.2566418003 -p 2.965278893 -0.07441162183 0.0008138428237 -p 2.664126958 -0.07441162183 -0.2550141147 -p 2.362975023 -0.07441162183 -0.5108420721 -p 2.061823088 -0.07441162183 -0.7666700296 -p 2.061823088 -0.07441162183 -0.6606965633 -p 2.061823088 -0.07441162183 -0.5547230969 -p 2.061823088 -0.07441162183 -0.4487496306 -p 1.911247121 -0.08598786163 -0.4487496306 -p 1.611107707 -0.1097601356 -0.4490597983 -p 1.543826685 -0.12521863 -0.6271363328 -p 1.448486823 -0.1459339066 -0.7943699031 -p 1.331521113 -0.1738764247 -0.9497641242 -p 1.194686143 -0.2096769734 -1.090964979 -p 1.040023601 -0.2470580808 -1.215873888 -p 0.8698321434 -0.2834269299 -1.322627106 -p 0.686689937 -0.3099881241 -1.409621426 -p 0.557687612 -0.3262635582 -1.453606113 -p 0.4920302732 -0.3339720503 -1.471906561`; break;
+		case 10: $tmp[0] = `curve -n $controlName -d 3 -p -0.004452216177 -0.1318807285 -1.441885492 -p -0.002968147828 -0.131883084 -1.441888727 -p 0.4641797649 -0.1322546722 -1.44239812 -p 1.396991516 0.1005643718 -1.123237254 -p 1.762544064 0.1322546722 0.03070766583 -p 1.396991516 0.1005643718 1.184652586 -p 0.4655406362 -0.1319150145 1.44239812 -p 2.43130277e-015 -0.1318842401 1.442364001 -p -0.4655406362 -0.1319150145 1.44239812 -p -1.396991516 0.1005643718 1.184652586 -p -1.762544064 0.1322546722 0.03070766583 -p -1.396991516 0.1005643718 -1.123237254 -p -0.4641797649 -0.1322546722 -1.44239812 -p 0.002968147828 -0.131883084 -1.441888727 -p 0.004452216177 -0.1318807285 -1.441885492`; break;
+		case 11: $tmp[0] = `curve -n $controlName -d 1 -p 0 20 0 -p -0.403 26 0 -p -1.433 26 0 -p -1.433 26.5 0 -p 1.381 26.5 0 -p 1.381 26 0 -p 0.351 26 0 -p 0 20 0 -k 0 -k 1 -k 2 -k 3 -k 4 -k 5 -k 6 -k 7`; break;
+		case 12: $tmp[0] = `curve -n $controlName -d 1 -p 4 0 -2 -p 0 0 4 -p -4 0 -2 -p 0 0 -1 -p 4 0 -2 -k 0 -k 1 -k 2 -k 3 -k 4`; break;
+		case 13: $tmp[0] = `curve -n $controlName -d 1  -p -1 0 0 -p 1 0 0 -p 0 0 0 -p 0 0 -1 -p 0 0 1 -p 0 0 0 -p 0 1 0 -p 0 -1 0 -k 0 -k 1 -k 2 -k 3 -k 4 -k 5 -k 6 -k 7`; break;
+		case 14: $tmp[0] = `curve -n $controlName -d 1 -p -0.5 0 -0.5 -p 0.5 0 -0.5 -p 0.5 0 0.5 -p -0.5 0 0.5 -p -0.5 0 -0.5`; break;
+		
+		default : break;
+	} 
+	setAttr ($tmp[0]+".sx") $size;
+	setAttr ($tmp[0]+".sy") $size;
+	setAttr ($tmp[0]+".sz") $size;
+	makeIdentity -apply true -t 1 -r 1 -s 1 -n 0 $tmp[0];
+	
+	return $tmp[0];
+}
+
+proc string[] sofa_rig_createControl(   string $parentObj, // The parent object which the current control will follow								
+										int $isFollowParentObj, // sholud parentObj point and orient constrain to control_offset node																	
+										string $startJoint, // In fk mode, this procedure will check how many joints between start and end joint, and create divide node to distribute rotation for all joints
+										int $connectAttr, // what attr should be connected(parentConstraint)	0 : none  1 : rotate  2. translate  3: rotate&translate
+										string $endJoint, // The end stop joint, it wont be affect by this control
+										string $controlName, // The prefix name of control
+										int $controlType, // The curve shape of control
+										int $controlColor, // The overide color of control									
+										int $isFreeOrient,  // Is create free orient control
+										string $freeOrientFollowObj,
+										string $freeOrientCleanObj,
+										int $isStretch, // Should stretch be created										
+										int $isAlignToJoint, // Should control has to be adjusted to the same orientation and position with joint															
+										string $cleanObj, // the clean group
+										int $side, // left = 1, right = 2
+										float $controlSize, // The scaling of control			
+										float $controlOffsetTX,	// The next 6 args is in order to move or rotate the curve CV after they are created, this wont acturally affect the rotation of control
+										float $controlOffsetTY,
+										float $controlOffsetTZ,
+										float $controlOffsetRX,
+										float $controlOffsetRY,
+										float $controlOffsetRZ,
+										float $controlParentGrpOffsetRX, // Thses 3 args are designed to apply extra rotation for control, for example : you want to make the X axis to align with axis Z of the other
+										float $controlParentGrpOffsetRY,
+										float $controlParentGrpOffsetRZ,
+										int $mirror, // Dertermine is right side should be mirror, for IK control we usuallt dont need it
+										string $setArray )
+{
+	/*
+	 The FK control that we will create here has 2 level of parents
+	 control_offset......................pointConstrain to upperArmjoint and ortConstrain to shoulder joint
+			control_orient................orient constrain to free_orient and control_offset
+				control...........................real controller made of NURBS curve
+	
+	The return value will be:
+	 result[2] = control_offset
+	 result[1] = control_orient
+	 result[0] = control	
+	 
+	This FK control function is based on "Left" side, for "Right" side we need to take into account the opposite transformation
+	*/
+	
+	if ( `objExists $controlName` )
+		error ( "More than one object matches name: " + $controlName );
+	
+	int $rightSide = 0;
+	if ( $side == 2 )
+		$rightSide = 1;
+	int $worldSpace = 1;
+	if ($isAlignToJoint)
+		$worldSpace = 0;
+		
+	string $result[3];	
+	//------------------------Create control curve depend on argument of 1--------------------------------------------------------------------------
+	$result[0] = sofa_rig_createCurve ( $controlName, $controlType, $controlSize );
+	
+	/*Rotation order is based on joint */
+	int $rotOrder = 0;
+	if ( `objExists $startJoint` )
+	{
+		int $rotOrder = `getAttr ($startJoint+".rotateOrder")`;			
+		setAttr ($controlName+".rotateOrder") $rotOrder;
+	}	
+	
+	/*Modify the draw color*/
+	if ( $controlColor > 1 )
+	{
+		setAttr ($controlName + ".overrideEnabled") 1;
+		setAttr ($controlName+".overrideColor") $controlColor;
+	}
+	
+	//------------------------Add 2 parent groups--------------------------------------------------------------------------/
+	string $control_orient = `group -em -n ($controlName+"_orient")`;
+	setAttr ($control_orient+".rotateOrder") $rotOrder;
+	
+	string $control_offset = `group -em -n ($controlName+"_offset")`;
+	setAttr ($control_offset+".rotateOrder") $rotOrder;
+	
+	string $control_parent = `group -em -n ($controlName+"_parent")`;
+	setAttr ($control_parent+".rotateOrder") $rotOrder;
+	
+	parent $controlName $control_parent;
+	parent $control_parent $control_orient;
+	parent $control_orient $control_offset;	
+	
+	if ( $rightSide )
+	{
+		// set control Scale X to -1 for right side 
+		setAttr ($controlName+".sx") -1;
+		
+		// For world space, the right side need to be rotate 0 180 -180 and scale y -1 in order to sync with left side
+		if($worldSpace && $mirror)
+		{
+			setAttr ($controlName+".sz") -1;
+			setAttr ($controlName+".sy") -1;
+			xform -os -r -ro 0 180 -180 $control_offset;
+		}				
+	}	
+	if (`objExists $startJoint`)
+	{
+		// Move to joint's position
+		string $tmp[] = `pointConstraint -offset 0 0 0 -weight 1 $startJoint $control_offset`;
+		delete $tmp[0];
+
+		// Align to joint's orientation		
+		if (!$worldSpace)
+		{
+			$tmp = `orientConstraint -offset 0 0 0 -weight 1 $startJoint $control_offset`;
+			delete $tmp[0];
+		}
+	}
+	// Here we apply the addtional rotation of control's parent group in order to make its orientation align to the particular direction
+	// to keep the control away from changing, we un-parent it to world and re-parent after rotation was applied
+	parent -w $controlName;
+	xform -os -r -ro $controlParentGrpOffsetRX $controlParentGrpOffsetRY $controlParentGrpOffsetRZ $control_offset;
+	// compromise the rotation to keep the control un-rotated
+	parent $controlName $control_parent;
+	
+	//Apply extra translation
+	if ( $rightSide )
+	{
+		$controlOffsetTX *= -1;
+		$controlOffsetRY *= -1;
+		$controlOffsetRZ *= -1;
+	}
+	xform -ws -r -t $controlOffsetTX $controlOffsetTY $controlOffsetTZ $controlName;
+	xform -ws -r -ro $controlOffsetRX $controlOffsetRY $controlOffsetRZ $controlName;	
+	
+	// freeze control for all transform
+	makeIdentity -apply true -t 1 -r 1 -s 1 -n 0 $controlName;
+	
+	
+	// Because we offset translate and freeze transform so we need to move the pivot back to joint
+	if (`objExists $startJoint`)
+	{
+		float $pos[3] = `xform -q -ws -t $startJoint`;
+		xform -ws -rotatePivot $pos[0] $pos[1] $pos[2] $controlName;
+		xform -ws -scalePivot $pos[0] $pos[1] $pos[2] $controlName;
+	}
+	
+	// set retrun value	
+	$result[1] = $control_orient;
+	$result[2] = $control_offset;	
+	
+	//------------------------Constrain control to joint--------------------------------------------------------------------------
+	/*
+	1. curve -> joint
+	2. parent' object -> curve'parent grp
+	*/
+	if (`objExists $startJoint`)
+	{
+		if ( $isFollowParentObj )
+		{
+			pointConstraint -mo -weight 1 $startJoint $control_offset;	
+			if ( `objExists $parentObj`)
+				orientConstraint -mo -weight 1 $parentObj $control_offset;
+		}
+		string $result[1];
+		if (`objExists $endJoint`)		
+			$result = `listRelatives -p $endJoint`;
+			
+		if ( $startJoint == $result[0] || $endJoint == "" || $connectAttr != 1 )
+		{			
+			// insert free orient here 
+			
+			if ( $connectAttr == 1 )
+			{
+				parentConstraint -mo -skipTranslate x -skipTranslate y -skipTranslate z -weight 1 $controlName $startJoint;
+				sofa_rig_setLockAttributes( 1, $controlName, "sx sy sz tx ty tz" );
+				sofa_rig_setHideAttributes( 1, $controlName, "sx sy sz tx ty tz v" );
+			}
+			if ( $connectAttr == 2 )
+			{
+				parentConstraint -mo -skipRotate x -skipRotate y -skipRotate z -weight 1 $controlName $startJoint;
+				sofa_rig_setLockAttributes( 1, $controlName, "sx sy sz rx ry rz" );
+				sofa_rig_setHideAttributes( 1, $controlName, "sx sy sz rx ry rz v" );
+			}
+			if ( $connectAttr == 3 )
+			{
+				parentConstraint -mo -weight 1 $controlName $startJoint;
+				sofa_rig_setLockAttributes( 1, $controlName, "sx sy sz" );
+				sofa_rig_setHideAttributes( 1, $controlName, "sx sy sz v" );
+			}
+			
+			//------------------------Create free orient control--------------------------------------------------------------------------
+			if ( $isFreeOrient)
+			{
+				/* create free_orient rig for upper arm*/
+				string $control_world_orient = `group -em -n ($controlName+"_world_orient")`;
+				sofa_rig_alignAndAttach( $control_world_orient, $controlName, 1, 1);		
+
+				string $ortConst[1] = `parentConstraint -skipTranslate x -skipTranslate y -skipTranslate z -weight 1 $control_world_orient $control_offset $control_orient`;		
+				
+				/*create reverse node to implement 1 - X to control orientation*/
+				string $FKUpperArmCtrlFreeOriRev = `shadingNode -n ($controlName+"_free_orient_reverse") -asUtility reverse`;
+				
+				/*Add attr and make those connection*/
+				addAttr -ln "Free_Orient" -at double  -min 0 -max 1 -dv 0 $controlName;
+				setAttr -e -keyable true ($controlName+".Free_Orient");
+				connectAttr -f ($controlName+".Free_Orient") ($ortConst[0]+"."+$control_world_orient+"W0");
+				connectAttr -f ($controlName+".Free_Orient") ($FKUpperArmCtrlFreeOriRev+".inputX");
+				connectAttr -f ($FKUpperArmCtrlFreeOriRev+".outputX") ($ortConst[0]+"."+$control_offset+"W1");	
+				
+				if ( `objExists $freeOrientFollowObj`)
+					parentConstraint -mo -weight 1 $freeOrientFollowObj $control_world_orient;
+				if ( `objExists $freeOrientCleanObj`)
+					parent $control_world_orient $freeOrientCleanObj;
+			}
+		}
+		else
+		{
+			/* Create multi-joints control*/
+			string $control_grp = ($controlName+"_multiRot_grp");
+			group -em -n $control_grp;			
+			float $pos[3] = `xform -q -ws -t $startJoint`;
+			xform -ws -t $pos[0] $pos[1] $pos[2] $control_grp;
+			float $rot[3];
+	
+			//------------------------Create free orient control--------------------------------------------------------------------------
+			if ($isFreeOrient)
+			{
+				/* create free_orient rig for upper arm*/
+				string $control_world_orient = `group -em -n ($control_grp+"_world_orient")`;
+				xform -ws -ro $rot[0] $rot[1] $rot[2] $control_world_orient;
+
+				string $ortConst[1] = `parentConstraint -mo -skipTranslate x -skipTranslate y -skipTranslate z -weight 1 $control_world_orient $parentObj $control_grp`;		
+				
+				/*create reverse node to implement 1 - X to control orientation*/
+				string $FKUpperArmCtrlFreeOriRev = `shadingNode -n ($control_grp+"_free_orient_reverse") -asUtility reverse`;
+				
+				/*Add attr and make those connection*/
+				addAttr -ln "Free_Orient" -at double  -min 0 -max 1 -dv 0 $controlName;
+				setAttr -e -keyable true ($controlName+".Free_Orient");
+				connectAttr -f ($controlName+".Free_Orient") ($ortConst[0]+"."+$control_world_orient+"W0");
+				connectAttr -f ($controlName+".Free_Orient") ($FKUpperArmCtrlFreeOriRev+".inputX");
+				connectAttr -f ($FKUpperArmCtrlFreeOriRev+".outputX") ($ortConst[0]+"."+$parentObj+"W1");				
+				
+				if ( `objExists $freeOrientFollowObj`)
+					parentConstraint -mo -weight 1 $freeOrientFollowObj $control_world_orient;
+				if ( `objExists $freeOrientCleanObj`)
+					parent $control_world_orient $freeOrientCleanObj;
+			}
+			else
+				parentConstraint -mo -skipTranslate x -skipTranslate y -skipTranslate z -weight 1 $parentObj $control_grp;					
+			
+			if ( `objExists $freeOrientCleanObj` )
+				parent $control_grp $freeOrientCleanObj;		
+			
+			string $multiNode = `shadingNode -n ($controlName+"_multiRot_divide") -asUtility multiplyDivide`;
+			setAttr ($multiNode+".operation") 2;			
+
+			string $addNode = `shadingNode -n ($controlName+"_multiRot_add") -asUtility plusMinusAverage`;
+			connectAttr -f ($controlName+".rotate") ($addNode+".input3D[0]");
+			connectAttr -f ($control_parent+".rotate") ($addNode+".input3D[1]");			
+			connectAttr -f ($addNode+".output3D") ($multiNode+".input1");		
+	
+			int $n = 0;	
+			string $result[1] = {$startJoint};
+			string $last_parent;
+			do
+			{
+				string $thisJoint = $result[0];				
+				string $orientGrp, $connectGrp, $constraintGrp;				
+
+				float $ortValue[3] = `getAttr ($control_offset+".r")`;
+				
+				if ( $pos[0] != 0 || $pos[1] != 0 || $pos[2] != 0 )
+				{
+					$orientGrp = `group -em -n ($thisJoint+"_multiRot_ort_grp")`;	// This grp is used in order to apply extra rotation
+					$connectGrp = `group -em -n ($thisJoint+"_multiRot_ws_grp")`;	// This grp will be the parent of  $orientGrp, compensate the transformation from local to world space
+					parent $connectGrp $orientGrp;
+					setAttr ($orientGrp+".r") $ortValue[0] $ortValue[1] $ortValue[2];				
+				}
+				else
+				{
+					$orientGrp = `group -em -n ($thisJoint+"_multiRot_ort_grp")`;
+					$connectGrp = `group -em -n ($thisJoint+"_multiRot_ws_grp")`;
+					parent $connectGrp $orientGrp;
+					if(!$worldSpace)
+					{
+						$rot = `xform -q -ws -ro $startJoint`;
+						xform -ws -r -ro $rot[0] $rot[1] $rot[2] $orientGrp;
+					}
+				}
+				
+				// do here
+				string $constraintGrp = `group -em -n ($thisJoint+"_multiRot_os_grp")`;	// This grp will orient constraint joint directly		
+				parent $constraintGrp $connectGrp;							
+				
+				//move ws to joint
+				$pos = `xform -q -ws -t $thisJoint`;
+				xform -ws -t $pos[0] $pos[1] $pos[2] $orientGrp;
+		
+				float $rot[3] = `xform -q -ws -ro $thisJoint`;
+				xform -ws -ro $rot[0] $rot[1] $rot[2] $constraintGrp;
+				
+				//orientation constrain	
+				parentConstraint -mo -skipTranslate x -skipTranslate y -skipTranslate z -weight 1 $constraintGrp $thisJoint;
+				
+				sofa_rig_setLockAttributes( 1, $controlName, "sx sy sz tx ty tz" );
+				sofa_rig_setHideAttributes( 1, $controlName, "sx sy sz tx ty tz v" );	
+
+				//parent to last grp		
+				if (`objExists $last_parent`)
+					parent $orientGrp $last_parent;
+				else
+					parent $orientGrp $control_grp;
+				$last_parent = $connectGrp;						
+						
+				//connect divided roattion to ws
+				connectAttr -f ($multiNode+".output") ($connectGrp+".rotate");
+				
+				$result = `listRelatives -c $result[0]`;
+				if (!`objExists $result[0]`)
+					break;
+				$n++;				
+				
+			}
+			
+			while ( $result[0] != $endJoint );
+			setAttr ($multiNode+".input2X") $n;
+			setAttr ($multiNode+".input2Y") $n;
+			setAttr ($multiNode+".input2Z") $n;
+		}		
+	}
+	
+	//------------------------Create stretch control--------------------------------------------------------------------------
+	if ( $isStretch && `objExists $startJoint` && `objExists $endJoint` )
+	{	
+		addAttr -ln "Stretch" -defaultValue 1 -at double -min 0.001 -max 20 -k true $controlName;	
+		string $tmp[1] = {$startJoint};
+		do
+		{
+			string $thisJoint = $tmp[0];
+			$tmp = `listRelatives -c $tmp[0]`;
+			string $nextJoint = $tmp[0];
+			if (!`objExists $nextJoint`)
+				break;	
+			
+			/*To create stretch, we need to know the currently length of joint*/
+			float $pos1[] = `xform -q -ws -t $thisJoint`;
+			float $pos2[] = `xform -q -ws -t $nextJoint`;
+			vector $v = << $pos2[0]-$pos1[0], $pos2[1]-$pos1[1], $pos2[2]-$pos1[2] >>;
+			float $jointLength = mag( $v );
+		
+			/*Create MultiplyDivide node, and connect stretch attribute to first input, length of joint to second input, and have this value drive the translate*/				
+			string $multiplyNode = `createNode -n ($nextJoint + "_FK_Stretch_Multiply") multDoubleLinear`;	
+			connectAttr ($controlName + ".Stretch") ($multiplyNode + ".input1");
+			setAttr ($multiplyNode + ".input2") $jointLength;
+			connectAttr ($multiplyNode + ".output") ($nextJoint + ".tx");// here we assume the X axis is the child direction		
+		}
+		while ( $tmp[0] != $endJoint );
+	}
+	
+	// Add to control set
+	sofa_rig_createSet ( $setArray, $controlName );
+	
+	if ( `objExists $cleanObj` )
+		parent $control_offset $cleanObj;	
+	return $result;
+}
+
+global proc sofa_rig_createMoveablePivot ( int $controlColor, string $object, string $parent, int $isSetCreate )
+{
+	string $tmp[];
+	/// declare variables
+	$pivot = ($object + "_pivot");
+	$target = ($object + "_target");
+	$rivet = ($object + "_rivet");
+	$trigger = ($object + "_trigger");
+	 
+	/// Store and normalize main object transforms
+	$translate_x = `getAttr ($object + ".translateX")`;
+	$translate_y = `getAttr ($object + ".translateY")`;
+	$translate_z = `getAttr ($object + ".translateZ")`;
+	$rotate_x = `getAttr ($object + ".rotateX")`;
+	$rotate_y = `getAttr ($object + ".rotateY")`;
+	$rotate_z = `getAttr ($object + ".rotateZ")`;
+	$scale_x = `getAttr ($object + ".scaleX")`;
+	$scale_y = `getAttr ($object + ".scaleY")`;
+	$scale_z = `getAttr ($object + ".scaleZ")`;
+	setAttr -l off ($object + ".scaleX") ;
+	setAttr -l off ($object + ".scaleY") ;
+	setAttr -l off ($object + ".scaleZ") ;
+	setAttr -l off ($object + ".translateX") ;
+	setAttr -l off ($object + ".translateY") ;
+	setAttr -l off ($object + ".translateZ") ;
+	setAttr ($object + ".translateX") 0;
+	setAttr ($object + ".translateY") 0;
+	setAttr ($object + ".translateZ") 0;
+	setAttr ($object + ".rotateX") 0;
+	setAttr ($object + ".rotateY") 0;
+	setAttr ($object + ".rotateZ") 0;
+	setAttr ($object + ".scaleX") 1;
+	setAttr ($object + ".scaleY") 1;
+	setAttr ($object + ".scaleZ") 1;
+	setAttr ($object + ".rotatePivotX") 0;
+	setAttr ($object + ".rotatePivotY") 0;
+	setAttr ($object + ".rotatePivotZ") 0;
+	setAttr ($object + ".rotatePivotTranslateX") 0;
+	setAttr ($object + ".rotatePivotTranslateY") 0;
+	setAttr ($object + ".rotatePivotTranslateZ") 0;
+
+	/// create pivot
+	string $setArray = "m_bodyCtl_set";
+	if(!$isSetCreate)
+		$setArray = "";	
+	string $result[] = sofa_rig_createControl( "", 0, "", 0, "", ($object + "_pivot"), 13, $controlColor, 0, "", "", 0, 0,	"", 0,1, 0,0,0,0,0,0,0,0,0,0, $setArray);
+	parent $result[0] $object;
+	delete $result[2];
+	
+	setAttr ($pivot + ".translateX") 0;
+	setAttr ($pivot + ".translateY") 0;
+	setAttr ($pivot + ".translateZ") 0;
+	setAttr ($pivot + ".rotateX") 0;
+	setAttr ($pivot + ".rotateY") 0;
+	setAttr ($pivot + ".rotateZ") 0;
+	setAttr ($pivot + ".scaleX") 1;
+	setAttr ($pivot + ".scaleY") 1;
+	setAttr ($pivot + ".scaleZ") 1;
+	addAttr -ln "isPivot" -at long  -min 0 -max 1 -dv 1;
+	addAttr -ln "pivotX" -at double;
+	addAttr -ln "pivotY" -at double;
+	addAttr -ln "pivotZ" -at double;
+	setAttr -k on ($pivot + ".pivotX");
+	setAttr -k on ($pivot + ".pivotY");
+	setAttr -k on ($pivot + ".pivotZ");
+
+	/// create trigger
+	spaceLocator -p 0 0 0;
+	rename ($object + "_trigger");
+	select -add $pivot;
+	parent;
+	setAttr ($trigger + ".translateX") 0;
+	setAttr ($trigger + ".translateY") 0;
+	setAttr ($trigger + ".translateZ") 0;
+	setAttr ($trigger + ".rotateX") 0;
+	setAttr ($trigger + ".rotateY") 0;
+	setAttr ($trigger + ".rotateZ") 0;
+	setAttr ($trigger + ".visibility") 0;
+
+	/// duplicate object and pivot
+	string $empty1 = `group -em -n ($object + "_dup")`;
+	sofa_rig_alignAndAttach( $empty1, $object, 1, 1 );
+	if( `objExists $parent` ) 
+		parent $empty1 $parent;
+	
+	string $empty2 = `group -em -n ($pivot + "_dup")`;
+	sofa_rig_alignAndAttach( $empty2, $pivot, 1, 1 );
+	parent $empty2 $empty1;	
+
+	setAttr -l off ($object + "_dup.translateX");
+	setAttr -l off ($object + "_dup.translateY");
+	setAttr -l off ($object + "_dup.translateZ");
+	setAttr ($object + "_dup.translateX") 0;
+	setAttr ($object + "_dup.translateY") 0;
+	setAttr ($object + "_dup.translateZ") 0;
+
+	/// create plane and its rivet
+	group -em -name ($object + "_plane");
+	spaceLocator -p 0 0 0 -name ($object + "_rivet");
+	parent ($object + "_plane") $object;
+	select -add ($object + "_rivet");
+	pointConstraint -offset 0 0 0 -weight 1;
+	select -r ($object + "_rivet");
+	if( `objExists $parent` ) 
+	{
+		select -add $parent;
+		parent;
+	}
+	setAttr ($object + "_plane.translateX") 0;
+	setAttr ($object + "_plane.translateY") 0;
+	setAttr ($object + "_plane.translateZ") 0;
+	setAttr ($object + "_plane.rotateX") 0;
+	setAttr ($object + "_plane.rotateY") 0;
+	setAttr ($object + "_plane.rotateZ") 0;
+	setAttr ($object + "_plane.visibility") 0;
+	setAttr ($rivet + ".visibility") 0;
+
+	/// create target
+	spaceLocator -p 0 0 0;
+	rename ($object + "_target");
+	if( `objExists $parent` ) 
+	{
+		select -add $parent;
+		parent;
+	}
+	setAttr ($target + ".rotateX") 0;
+	setAttr ($target + ".rotateY") 0;
+	setAttr ($target + ".rotateZ") 0;
+	setAttr ($target + ".visibility") 0;
+
+	/// connect
+	connectAttr -f ($object + ".rotate") ($object + "_dup.rotate");
+	connectAttr -f ($pivot + ".translate") ($pivot + "_dup.translate");
+	pointConstraint -o 0 0 0 -w 1 ($pivot + "_dup") $target ;
+	connectAttr -f ($pivot + ".translate") ($object + ".rotatePivot");
+
+	/// Set back main object to original transforms
+	setAttr ($object + ".translateX") $translate_x;
+	setAttr ($object + ".translateY") $translate_y;
+	setAttr ($object + ".translateZ") $translate_z;
+	setAttr ($object + ".rotateX") $rotate_x;
+	setAttr ($object + ".rotateY") $rotate_y;
+	setAttr ($object + ".rotateZ") $rotate_z;
+	setAttr ($object + ".scaleX") $scale_x;
+	setAttr ($object + ".scaleY") $scale_y;
+	setAttr ($object + ".scaleZ") $scale_z;
+
+	/// Add and lock channels
+	addAttr -ln "showPivot" -at long  -min 0 -max 1 -dv 0 $object;
+	setAttr -e -keyable true ($object + ".showPivot");
+	connectAttr -f ($object + ".showPivot") ($pivot + ".visibility");
+	setAttr -lock true -keyable false ($pivot + ".rx");
+	setAttr -lock true -keyable false ($pivot + ".ry");
+	setAttr -lock true -keyable false ($pivot + ".rz");
+	setAttr -lock true -keyable false ($pivot + ".sx");
+	setAttr -lock true -keyable false ($pivot + ".sy");
+	setAttr -lock true -keyable false ($pivot + ".sz");
+	setAttr -lock true -keyable false ($pivot + ".v");
+
+	/// Create the expressions
+	expression -n "rootPivot1_exp" -s ( "float $actual_tx;\r\nfloat $last_tx;\r\nfloat $actual_ty;\r\nfloat $last_ty;\r\nfloat $actual_tz;\r\nfloat $last_tz;\r\nfloat $actual_rx;\r\nfloat $last_rx;\r\nfloat $actual_ry;\r\nfloat $last_ry;\r\nfloat $actual_rz;\r\nfloat $last_rz;\r\nfloat $offset_tx;\r\nfloat $offset_ty;\r\nfloat $offset_tz;\r\n\r\n"+$object+"_trigger.translateX = "+$object+"_pivot.translateX;\r\n"+$object+"_trigger.translateY = "+$object+"_pivot.translateY;\r\n"+$object+"_trigger.translateZ = "+$object+"_pivot.translateZ;\r\n"+$object+"_trigger.rotateX = "+$object+".rotateX;\r\n"+$object+"_trigger.rotateY = "+$object+".rotateY;\r\n"+$object+"_trigger.rotateZ = "+$object+".rotateZ;\r\n\r\n$actual_tx = "+$object+"_pivot.translateX;\r\n$actual_ty = "+$object+"_pivot.translateY;\r\n$actual_tz = "+$object+"_pivot.translateZ;\r\n\r\n$actual_rx = "+$object+".rotateX;\r\n$actual_ry = "+$object+".rotateY;\r\n$actual_rz = "+$object+".rotateZ;\r\n\r\nif ($actual_rx != $last_rx || $actual_ry != $last_ry || $actual_rz != $last_rz)\r\n{\r\n$offset_tx = "+$object+"_rivet.translateX - "+$object+".translateX;\r\n$offset_ty = "+$object+"_rivet.translateY - "+$object+".translateY;\r\n$offset_tz = "+$object+"_rivet.translateZ - "+$object+".translateZ;\r\n}\r\n\r\nif ($actual_tx != $last_tx || $actual_ty != $last_ty || $actual_tz != $last_tz)\r\n{\r\n"+$object+".scalePivotX = 0 ;\r\nsetAttr \""+$object+"_pivot.pivotX\" ("+$object+"_target.translateX - "+$object+"_pivot.translateX + $offset_tx);\r\nsetAttr \""+$object+"_pivot.pivotY\" ("+$object+"_target.translateY - "+$object+"_pivot.translateY + $offset_ty);\r\nsetAttr \""+$object+"_pivot.pivotZ\" ("+$object+"_target.translateZ - "+$object+"_pivot.translateZ + $offset_tz);\r\n}\r\n\r\n$last_tx= "+$object+"_pivot.translateX;\r\n$last_ty= "+$object+"_pivot.translateY;\r\n$last_tz= "+$object+"_pivot.translateZ;\r\n\r\n$last_rx = "+$object+".rotateX;\r\n$last_ry = "+$object+".rotateY;\r\n$last_rz = "+$object+".rotateZ;" )  -o "" -ae 1 -uc all ;
+	//expression -n "rootPivot1_exp" -s "float $actual_tx;\r\nfloat $last_tx;\r\nfloat $actual_ty;\r\nfloat $last_ty;\r\nfloat $actual_tz;\r\nfloat $last_tz;\r\nfloat $actual_rx;\r\nfloat $last_rx;\r\nfloat $actual_ry;\r\nfloat $last_ry;\r\nfloat $actual_rz;\r\nfloat $last_rz;\r\nfloat $offset_tx;\r\nfloat $offset_ty;\r\nfloat $offset_tz;\r\n\r\nROOT_trigger.translateX = ROOT_pivot.translateX;\r\nROOT_trigger.translateY = ROOT_pivot.translateY;\r\nROOT_trigger.translateZ = ROOT_pivot.translateZ;\r\nROOT_trigger.rotateX = ROOT.rotateX;\r\nROOT_trigger.rotateY = ROOT.rotateY;\r\nROOT_trigger.rotateZ = ROOT.rotateZ;\r\n\r\n$actual_tx = ROOT_pivot.translateX;\r\n$actual_ty = ROOT_pivot.translateY;\r\n$actual_tz = ROOT_pivot.translateZ;\r\n\r\n$actual_rx = ROOT.rotateX;\r\n$actual_ry = ROOT.rotateY;\r\n$actual_rz = ROOT.rotateZ;\r\n\r\nif ($actual_rx != $last_rx || $actual_ry != $last_ry || $actual_rz != $last_rz)\r\n{\r\n$offset_tx = ROOT_rivet.translateX - ROOT.translateX;\r\n$offset_ty = ROOT_rivet.translateY - ROOT.translateY;\r\n$offset_tz = ROOT_rivet.translateZ - ROOT.translateZ;\r\n}\r\n\r\nif ($actual_tx != $last_tx || $actual_ty != $last_ty || $actual_tz != $last_tz)\r\n{\r\nROOT.scalePivotX = 0 ;\r\nsetAttr \"ROOT_pivot.pivotX\" (ROOT_target.translateX - ROOT_pivot.translateX + $offset_tx);\r\nsetAttr \"ROOT_pivot.pivotY\" (ROOT_target.translateY - ROOT_pivot.translateY + $offset_ty);\r\nsetAttr \"ROOT_pivot.pivotZ\" (ROOT_target.translateZ - ROOT_pivot.translateZ + $offset_tz);\r\n}\r\n\r\n$last_tx= ROOT_pivot.translateX;\r\n$last_ty= ROOT_pivot.translateY;\r\n$last_tz= ROOT_pivot.translateZ;\r\n\r\n$last_rx = ROOT.rotateX;\r\n$last_ry = ROOT.rotateY;\r\n$last_rz = ROOT.rotateZ;"  -o "" -ae 1 -uc all ;
+	expression -n "rootPivot2_exp" -s ($object + ".rotatePivotTranslateX = " + $pivot + ".pivotX;\r\n" + $object + ".rotatePivotTranslateY = " + $pivot + ".pivotY;\r\n" + $object + ".rotatePivotTranslateZ = " + $pivot + ".pivotZ;");
+		
+	string $condition = `shadingNode -n ("rootPivotSwitch") -asUtility condition`;
+	setAttr ($condition+".operation") 2;
+	setAttr ($condition+".colorIfTrueR") 0;
+	setAttr ($condition+".colorIfFalseR") 2;
+	setAttr ($condition+".secondTerm") 0;	
+	connectAttr -f ($object + ".showPivot") ($condition+".firstTerm");
+	connectAttr -f ($condition+".outColorR") ("rootPivot1_exp.nodeState");
+	connectAttr -f ($condition+".outColorR") ("rootPivot2_exp.nodeState");
+
+}
+
+global proc sofa_rig_createTemplate( int $controlColor, string $hipJoint, int $isSetCreate, int $isPivotMove )
+{	
+	if ( !`objExists $hipJoint`)
+		error ($hipJoint+" doesn't exist.");
+	
+	if (!`attributeExists "skeletonType" $hipJoint`)	
+		addAttr -ln "skeletonType" -dt "string" $hipJoint;
+	setAttr -type "string" ($hipJoint+".skeletonType") "controlRig";
+		
+	select -cl;
+		
+	// Thses variables of template name are global 
+	global string $gTemplateAll, $gTemplateTransformA, $gTemplateTransformB, $gTemplateTransformC, $gTemplateDeformer, $gTemplateRig, $gTemplateGeometry, 
+	$gTemplateControl, $gTemplateSkeleton, $gTemplateBody_rig, $gTemplateFacial_rig, $gTemplateBody_control, $gTemplateFacial_control, $gTemplateBody_skeleton, 
+	$gTemplateFacial_skeleton;
+	global int $useNewNamingRule;
+	
+	$controlColor--;
+
+	string $onObj = "ON_OBJ";
+	string $root = "ROOT";
+	if($useNewNamingRule)	
+	{
+		$onObj = "m_onObj_ctl_fk";
+		$root = "m_move_ctl_fk";	
+	}
+	
+	// create all groups without particular name to avid naming conflict
+	group -em -n $gTemplateAll;
+	group -em -n $gTemplateTransformA;
+	group -em -n $gTemplateTransformB;
+	group -em -n $gTemplateTransformC;
+	group -em -n $gTemplateDeformer;
+	group -em -n $gTemplateRig;
+	group -em -n $gTemplateGeometry;
+	group -em -n $gTemplateControl; 
+	group -em -n $gTemplateSkeleton;
+	group -em -n $gTemplateBody_rig; 
+	group -em -n $gTemplateFacial_rig; 
+	group -em -n $gTemplateBody_control;
+	group -em -n $gTemplateFacial_control; 
+	group -em -n $gTemplateBody_skeleton; 
+	group -em -n $gTemplateFacial_skeleton;
+	
+	// parent each other
+	parent $gTemplateBody_skeleton $gTemplateFacial_skeleton $gTemplateSkeleton;
+	parent $gTemplateBody_control $gTemplateFacial_control $gTemplateControl;
+	parent $gTemplateBody_rig $gTemplateFacial_rig $gTemplateRig;	
+	parent $gTemplateDeformer $gTemplateRig $gTemplateGeometry $gTemplateControl $gTemplateSkeleton $gTemplateTransformC;
+	parent $gTemplateTransformC $gTemplateTransformB;
+	parent $gTemplateTransformB $gTemplateTransformA;
+	parent $gTemplateTransformA $gTemplateAll;
+	
+	// set visibility of channelbox	
+	sofa_rig_setHideAttributes( 1, $gTemplateAll, "tx ty tz rx rz ry rz sx sy sz" );
+	sofa_rig_setLockAttributes( 1, $gTemplateAll, "tx ty tz rx rz ry rz sx sy sz" );	
+	sofa_rig_setHideAttributes( 1, $gTemplateTransformA, "sx sy sz v" );
+	sofa_rig_setLockAttributes( 1, $gTemplateTransformA, "sx sy sz v" );		
+	sofa_rig_setHideAttributes( 1, $gTemplateTransformB, "sx sy sz v" );
+	sofa_rig_setLockAttributes( 1, $gTemplateTransformB, "sx sy sz v" );	
+	sofa_rig_setHideAttributes( 1, $gTemplateTransformC, "sx sy sz v" );
+	sofa_rig_setLockAttributes( 1, $gTemplateTransformC, "sx sy sz v" );
+	
+	sofa_rig_setHideAttributes( 1, $gTemplateDeformer, "tx ty tz rx ry rz sx sy sz" );
+	sofa_rig_setLockAttributes( 1, $gTemplateDeformer, "tx ty tz rx ry rz sx sy sz" );
+	sofa_rig_setHideAttributes( 1, $gTemplateRig, "tx ty tz rx ry rz sx sy sz" );
+	sofa_rig_setLockAttributes( 1, $gTemplateRig, "tx ty tz rx ry rz sx sy sz" );
+	sofa_rig_setHideAttributes( 1, $gTemplateGeometry, "tx ty tz rx ry rz sx sy sz" );
+	sofa_rig_setLockAttributes( 1, $gTemplateGeometry, "tx ty tz rx ry rz sx sy sz" );
+	sofa_rig_setHideAttributes( 1, $gTemplateControl, "tx ty tz rx ry rz sx sy sz" );
+	sofa_rig_setLockAttributes( 1, $gTemplateControl, "tx ty tz rx ry rz sx sy sz" );
+	sofa_rig_setHideAttributes( 1, $gTemplateSkeleton, "tx ty tz rx ry rz sx sy sz" );
+	sofa_rig_setLockAttributes( 1, $gTemplateSkeleton, "tx ty tz rx ry rz sx sy sz" );
+
+	// create base control 
+	int $rotOrder = `getAttr ($hipJoint+".rotateOrder")`;		
+	
+	string $setArray = "m_bodyCtl_set m_torsoCtl_set";
+	if(!$isSetCreate)
+		$setArray = "";	
+	string $result[] = sofa_rig_createControl( "", 0, "", 0, "", $root, 12, $controlColor, 0, "", "", 0, 0,$gTemplateControl, 0, 1, 0, 0, 0, 0, 0, 0, 0,0,0,0, $setArray);
+	$root = $result[0];
+	setAttr ($root+".rotateOrder") $rotOrder;
+	parent $root $gTemplateControl;
+	delete $result[2];
+	
+	$setArray = "m_bodyCtl_set";
+	if(!$isSetCreate)
+		$setArray = "";	
+	$result = sofa_rig_createControl( "", 0, "", 0, "", $onObj, 11, $controlColor, 0, "", "", 0, 0, $gTemplateControl, 0, 1, 0, 0, 0, 0, 0, 0, 0,0,0,0, $setArray);
+	$onObj = $result[0];
+	setAttr ($onObj+".rotateOrder") $rotOrder;
+	parent $onObj $gTemplateControl;
+	delete $result[2];	
+	
+	// because the pivot of root will move, other control which follow root can't be parent under root directly,
+	// we need to create another empty group parent under root, and ues this group to constrain other control
+	string $root_real = `group -em -n ($root +"_real")`;
+	setAttr ($root_real+".rotateOrder") $rotOrder;
+	parent $root_real $root;	
+	
+	// create a parent group for root, for moving pivot, all nodes which caculate pivot compersation must be in the same hireaky with root
+	string $root_orient = `group -n ($root+"_orient") $root`;
+	setAttr ($root_orient+".rotateOrder") $rotOrder;
+	if($isPivotMove)
+		sofa_rig_createMoveablePivot( $controlColor, $root, $root_orient, $isSetCreate );	
+
+	string $root_offset = `group -n ($root+"_offset") $root_orient`;	
+	setAttr ($root_offset+".rotateOrder") $rotOrder;
+	parent $root_offset $onObj $gTemplateBody_control;
+	
+	// root must follow by onObj
+	parentConstraint -mo -weight 1 $onObj $root_offset;
+
+	parent $hipJoint $gTemplateBody_skeleton;	
+	// constrain the root to skeleton grp
+	parentConstraint -mo -weight 1 $root_real $gTemplateBody_skeleton;
+	scaleConstraint -offset 1 1 1 -weight 1 $root_real $gTemplateBody_skeleton;	
+	
+	sofa_rig_setHideAttributes( 1, $onObj, "sx sy sz v" );
+	sofa_rig_setLockAttributes( 1, $onObj, "sx sy sz v" );	
+	sofa_rig_setHideAttributes( 1, $root, "v" );
+	sofa_rig_setLockAttributes( 1, $root, "v" );
+	
+	select -cl;	
+}
+
+//entry point
+global proc sofa_rig()
+{	
+	// Thses variables of template name are global 
+	global string $gTemplateAll, $gTemplateTransformA, $gTemplateTransformB, $gTemplateTransformC, $gTemplateDeformer, $gTemplateRig, $gTemplateGeometry, 
+	$gTemplateControl, $gTemplateSkeleton, $gTemplateBody_rig, $gTemplateFacial_rig, $gTemplateBody_control, $gTemplateFacial_control, $gTemplateBody_skeleton, 
+	$gTemplateFacial_skeleton;
+	
+	$gTemplateAll = "all";
+	$gTemplateTransformA = "transformA";
+	$gTemplateTransformB = "transformB";
+	$gTemplateTransformC = "transformC";
+	$gTemplateDeformer = "deformer";
+	$gTemplateRig = "rig";
+	$gTemplateGeometry = "geometry";	
+	$gTemplateControl = "control";
+	$gTemplateSkeleton = "skeleton";	
+	$gTemplateBody_rig = "body_rig";
+	$gTemplateFacial_rig = "facial_rig";
+	$gTemplateBody_control = "body_control";
+	$gTemplateFacial_control = "facial_control";
+	$gTemplateBody_skeleton = "body_skeleton";
+	$gTemplateFacial_skeleton = "facial_skeleton";
+	
+	if ( `window -ex sofa_rig_mainWIN` == true ) 
+		deleteUI sofa_rig_mainWIN;	
+	
+	/*
+	if ( `windowPref -ex sofa_rig_mainWIN` )
+		windowPref -remove sofa_rig_mainWIN;
+	*/
+	
+	// Current we have two type of naming rule for character controls
+	// Here we used global variable "$useNewNamingRule" to switch betwen two naming rule		
+	global int $useNewNamingRule;
+	$useNewNamingRule = 1;
+	string $root = "m_move_ctl_fk";
+	/*
+	string $root = "ROOT";
+	string $namingRuleMode = "Use old naming rule";
+	if($useNewNamingRule)
+	{
+		$root = "m_move_ctl_fk";
+		$namingRuleMode = "Use new naming rule";
+	}
+	*/
+	    
+	string $window = `window -menuBar true -widthHeight 340 650 -title "SOFA Rigging Tool 2008" sofa_rig_mainWIN`;
+	
+	/*
+	menu -label $namingRuleMode -tearOff false;			
+		menuItem -label "Use new naming rule" -c "global int $useNewNamingRule;$useNewNamingRule = 1;sofa_rig";
+		menuItem -label "Use old naming rule" -c "global int $useNewNamingRule;$useNewNamingRule = 0;sofa_rig";
+	*/
+	
+	menu -label "Help" -tearOff false;	
+		menuItem -label "Manual" -c ("s_openWebBrowser(\"http://wiki.emocm.com/display/SOFCommon/sofa+rig\")");
+			
+	string $form = `formLayout`;
+	string $tabs = `tabLayout -innerMarginWidth 5 -innerMarginHeight 5`;
+	formLayout -edit -attachForm $tabs "top" 0 -attachForm $tabs "left" 0 -attachForm $tabs "bottom" 0 -attachForm $tabs "right"  0 $form;		
+	
+		 //------------------------------------------------------------------------------------------------------------------------------------------
+		 //Template Rig Tab UI
+		string $child1 = `scrollLayout `;		
+			frameLayout -w 250 -h 170 -label "" -borderStyle "etchedIn";
+			
+				columnLayout;
+			
+					colorIndexSliderGrp	-cal 1 left -cw 1 75 -cw 2 35 -cw 3 100 -label "Control Color" -min 1 -max 31 -value 18 sofa_rig_tempControlColorCISG;
+					separator -h 20 -w 250 -style "out";	
+				
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Root Joint" -text "m_root_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_tempHipJointTFBG;" sofa_rig_tempHipJointTFBG;					
+					
+			
+					separator -h 20 -w 250 -style "out";	
+					rowColumnLayout -nc 2 -cw 1 100 -cw 2 100;
+						checkBox -label "create set" -v 1 isSetCreateCB;
+						checkBox -label "moving pivot" -v 1 isPivotMoveCB;					
+					setParent ..;	
+
+					string $createTemplateBTN = `button -h 25 -label "Create Template" -c "{int $controlColor = `colorIndexSliderGrp -q -v sofa_rig_tempControlColorCISG`; \
+					string $hipJoint = `textFieldButtonGrp -q -text sofa_rig_tempHipJointTFBG`; \
+					int $isSetCreate = `checkBox -q -v isSetCreateCB`; \
+					int $isPivotMove = `checkBox -q -v isPivotMoveCB`; \
+					sofa_rig_createTemplate( $controlColor, $hipJoint, $isSetCreate, $isPivotMove );}"`;
+				setParent ..;				
+			setParent ..;		
+		setParent ..;
+		 //------------------------------------------------------------------------------------------------------------------------------------------
+
+		 //------------------------------------------------------------------------------------------------------------------------------------------
+		 //Arm Rig Tab UI
+		string $child2 = `scrollLayout`;		
+			frameLayout -w 250 -h 570 -label "" -borderStyle "etchedIn";
+				columnLayout;
+				
+					checkBoxGrp -cal 1 left -cw3 50 80 80 -numberOfCheckBoxes 2 -label "Type" -labelArray2 "IK Arm" "FK Arm" -v1 1 -v2 1 sofa_rig_armTypeCBG;	
+					separator -h 20 -w 250 -style "out";
+					
+					radioButtonGrp -cal 1 left -cw3 50 80 80 -numberOfRadioButtons 2 -label "Side" -labelArray2 "Left" "Right" -sl 1 
+					-cc1 "colorIndexSliderGrp -e -v 7 sofa_rig_armControlColorCISG; \
+					string $a = `textFieldButtonGrp -q -tx sofa_rig_armShoulderJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_armShoulderJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_armUpperArmJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_armUpperArmJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_armUpperArm2JointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_armUpperArm2JointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_armLowerArmJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_armLowerArmJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_armLowerArm2JointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_armLowerArm2JointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_armHandJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_armHandJointTFBG;"					
+					-cc2 "colorIndexSliderGrp -e -v 14 sofa_rig_armControlColorCISG; \
+					string $a = `textFieldButtonGrp -q -tx sofa_rig_armShoulderJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_armShoulderJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_armUpperArmJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_armUpperArmJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_armUpperArm2JointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_armUpperArm2JointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_armLowerArmJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_armLowerArmJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_armLowerArm2JointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_armLowerArm2JointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_armHandJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_armHandJointTFBG;"
+					sofa_rig_armSideRBG;
+					separator -h 20 -w 250 -style "out";					
+
+					floatSliderGrp -cal 1 left -cw3 30 50 50 -label "Size" -s 0.1 -field true-minValue -0 -maxValue 10.0 -fieldMinValue -0 -fieldMaxValue 100.0 -value 10 sofa_rig_armControlSizeFSG;
+					separator -h 20 -w 250 -style "out";	
+					
+					colorIndexSliderGrp	-cal 1 left -cw 1 75 -cw 2 35 -cw 3 100 -label "Control Color" -min 1 -max 31 -value 7 sofa_rig_armControlColorCISG;
+					separator -h 20 -w 250 -style "out";
+					
+					checkBoxGrp -cal 1 left -cw2 100 50 -numberOfCheckBoxes 1 -label "Flip Pole Vector" -v1 0 sofa_rig_armFlipPoleVectorCBG;	
+					separator -h 20 -w 250 -style "out";
+
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Main Control" -text $root -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_armRootControlTFBG;" sofa_rig_armRootControlTFBG;
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Collar Joint" -text "l_collar_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_armShoulderJointTFBG;" sofa_rig_armShoulderJointTFBG;					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Shoulder Joint (IK Start)" -text "l_shoulder_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_armUpperArmJointTFBG;" sofa_rig_armUpperArmJointTFBG;					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Shoulder2 Joint" -text "" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_armUpperArm2JointTFBG;" sofa_rig_armUpperArm2JointTFBG;					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Elbow Joint" -text "l_elbow_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_armLowerArmJointTFBG;" sofa_rig_armLowerArmJointTFBG;					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Elbow2 Joint" -text "" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_armLowerArm2JointTFBG;" sofa_rig_armLowerArm2JointTFBG;					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Hand Joint (IK end)" -text "l_hand_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_armHandJointTFBG;" sofa_rig_armHandJointTFBG;
+					separator -h 20 -w 250 -style "out";
+					
+					checkBox -l "Create Space Switch (IK Arm Only)" -v 1 sofa_rig_spaceSwitchCB;
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Head Joint" -text "m_head_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_armHeadJointTFBG;" sofa_rig_armHeadJointTFBG;
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Chest Joint" -text "m_chest_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_armChestJointTFBG;" sofa_rig_armChestJointTFBG;
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Root Joint" -text "m_root_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_armHipJointTFBG;" sofa_rig_armHipJointTFBG;
+					separator -h 20 -w 250 -style "out";
+					
+					string $createArmRigBTN = `button -h 30 -label "Create Arm Rig" -c "{int $isIKArm = `checkBoxGrp -q -v1 sofa_rig_armTypeCBG`; \
+					int $isFKArm = `checkBoxGrp -q -v2 sofa_rig_armTypeCBG`; \
+					int $side = `radioButtonGrp -q -sl sofa_rig_armSideRBG`; \
+					float $controlSize = `floatSliderGrp -q -v sofa_rig_armControlSizeFSG`; \
+					int $controlColor = `colorIndexSliderGrp -q -v sofa_rig_armControlColorCISG`; \
+					string $clavicleJoint = `textFieldButtonGrp -q -text sofa_rig_armShoulderJointTFBG`; \
+					string $upperArmJoint = `textFieldButtonGrp -q -text sofa_rig_armUpperArmJointTFBG`; \
+					string $upperArm2Joint = `textFieldButtonGrp -q -text sofa_rig_armUpperArm2JointTFBG`; \
+					string $lowerArmJoint = `textFieldButtonGrp -q -text sofa_rig_armLowerArmJointTFBG`; \
+					string $lowerArm2Joint = `textFieldButtonGrp -q -text sofa_rig_armLowerArm2JointTFBG`; \
+					string $handJoint = `textFieldButtonGrp -q -text sofa_rig_armHandJointTFBG`; \
+					int $isSpaceSwitch= `checkBox -q -v sofa_rig_spaceSwitchCB`; \
+					string $headJoint= `textFieldButtonGrp -q -text sofa_rig_armHeadJointTFBG`; \
+					string $chestJoint = `textFieldButtonGrp -q -text sofa_rig_armChestJointTFBG`; \
+					string $hipJoint = `textFieldButtonGrp -q -text sofa_rig_armHipJointTFBG`; \
+					string $rootControl = `textFieldButtonGrp -q -text sofa_rig_armRootControlTFBG`; \
+					int $isFlipPoleVector = `checkBoxGrp -q -v1 sofa_rig_armFlipPoleVectorCBG`; \
+					sofa_rig_createArmRig( $isIKArm, $isFKArm, $side, $controlSize, $controlColor, $clavicleJoint, $upperArmJoint, $upperArm2Joint, $lowerArmJoint, $lowerArm2Joint, $handJoint, $isSpaceSwitch, $headJoint, $chestJoint, $hipJoint, $rootControl, $isFlipPoleVector);}"`;
+
+				setParent ..;
+			setParent ..;		
+		setParent ..;
+		 //------------------------------------------------------------------------------------------------------------------------------------------
+
+		 //------------------------------------------------------------------------------------------------------------------------------------------
+		 //Leg Rig Tab UI
+		string $child3 = `scrollLayout`;		
+			frameLayout -w 250 -h 550 -label "" -borderStyle "etchedIn";
+				columnLayout;
+				
+					checkBoxGrp -cal 1 left -cw3 50 80 80 -numberOfCheckBoxes 2 -label "Type" -labelArray2 "IK Leg" "FK Leg" -v1 1 -v2 1 sofa_rig_legTypeCBG;	
+					separator -h 20 -w 250 -style "out";
+					
+					radioButtonGrp -cal 1 left -cw3 50 80 80 -numberOfRadioButtons 2 -label "Side" -labelArray2 "Left" "Right" -sl 1 
+					-cc1 "colorIndexSliderGrp -e -v 7 sofa_rig_legControlColorCISG; \
+					string $a = `textFieldButtonGrp -q -tx sofa_rig_lowerHipJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_lowerHipJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_upperLegJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_upperLegJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_lowerLegJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_lowerLegJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_ankleJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_ankleJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_ballJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_ballJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_toeJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_toeJointTFBG;"
+					
+					-cc2 "colorIndexSliderGrp -e -v 14 sofa_rig_legControlColorCISG; \
+					string $a = `textFieldButtonGrp -q -tx sofa_rig_lowerHipJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_lowerHipJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_upperLegJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_upperLegJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_lowerLegJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_lowerLegJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_ankleJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_ankleJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_ballJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_ballJointTFBG; \
+					$a = `textFieldButtonGrp -q -tx sofa_rig_toeJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_toeJointTFBG;"	
+					sofa_rig_legSideRBG;
+					separator -h 20 -w 250 -style "out";
+					
+					floatSliderGrp -cal 1 left -cw3 30 50 50 -label "Size" -s 0.1 -field true-minValue -0 -maxValue 10.0 -fieldMinValue -0 -fieldMaxValue 100.0 -value 10 sofa_rig_legControlSizeFSG;
+					separator -h 20 -w 250 -style "out";	
+					
+					colorIndexSliderGrp	-cal 1 left -cw 1 75 -cw 2 35 -cw 3 100 -label "Control Color" -min 1 -max 31 -value 7 sofa_rig_legControlColorCISG;
+					separator -h 20 -w 250 -style "out";
+					
+					checkBoxGrp -cal 1 left -cw2 100 50 -numberOfCheckBoxes 1 -label "Flip Pole Vector" -v1 0 sofa_rig_legFlipPoleVectorCBG;	
+					separator -h 20 -w 250 -style "out";
+
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Main Control" -text $root -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_legRootControlTFBG;" sofa_rig_legRootControlTFBG;
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Hip Joint" -text "l_hip_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_lowerHipJointTFBG;" sofa_rig_lowerHipJointTFBG;					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Leg Joint (IK Start)" -text "l_leg_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_upperLegJointTFBG;" sofa_rig_upperLegJointTFBG;					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Leg2 Joint" -text "" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_upperLeg2JointTFBG;" sofa_rig_upperLeg2JointTFBG;					
+					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Knee Joint" -text "l_knee_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl `;textFieldButtonGrp -e -text $sel[0] sofa_rig_lowerLegJointTFBG;" sofa_rig_lowerLegJointTFBG;					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Knee2 Joint" -text "" -buttonLabel "Get" -bc "string $sel[]=`ls -sl `;textFieldButtonGrp -e -text $sel[0] sofa_rig_lowerLeg2JointTFBG;" sofa_rig_lowerLeg2JointTFBG;					
+					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Ankle Joint (IK End)" -text "l_ankle_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_ankleJointTFBG;" sofa_rig_ankleJointTFBG;
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Ball Joint" -text "l_ball_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_ballJointTFBG;" sofa_rig_ballJointTFBG;
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Toe Joint" -text "l_toe_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_toeJointTFBG;" sofa_rig_toeJointTFBG;
+					separator -h 20 -w 250 -style "out";					
+					
+					button -h 30 -label "Create Leg Rig" 
+					-c "sofa_rig_createLegRig(`checkBoxGrp -q -v2 sofa_rig_legTypeCBG`, \
+					`checkBoxGrp -q -v2 sofa_rig_legTypeCBG`, \
+					`radioButtonGrp -q -sl sofa_rig_legSideRBG`, \
+					`floatSliderGrp -q -v sofa_rig_legControlSizeFSG`, \
+					`colorIndexSliderGrp -q -v sofa_rig_legControlColorCISG`, \
+					`textFieldButtonGrp -q -text sofa_rig_legRootControlTFBG`, \
+					`textFieldButtonGrp -q -text sofa_rig_lowerHipJointTFBG`, \
+					`textFieldButtonGrp -q -text sofa_rig_upperLegJointTFBG`, \
+					`textFieldButtonGrp -q -text sofa_rig_upperLeg2JointTFBG`, \
+					`textFieldButtonGrp -q -text sofa_rig_lowerLegJointTFBG`, \
+					`textFieldButtonGrp -q -text sofa_rig_lowerLeg2JointTFBG`, \
+					`textFieldButtonGrp -q -text sofa_rig_ankleJointTFBG`, \
+					`textFieldButtonGrp -q -text sofa_rig_ballJointTFBG`, \
+					`textFieldButtonGrp -q -text sofa_rig_toeJointTFBG`, \
+					`checkBoxGrp -q -v1 sofa_rig_legFlipPoleVectorCBG`)";
+				setParent ..;
+			setParent ..;		
+		setParent ..;
+		 //------------------------------------------------------------------------------------------------------------------------------------------
+
+		//------------------------------------------------------------------------------------------------------------------------------------------
+		 //Body Rig Tab UI
+		string $child4 = `scrollLayout`;		
+			frameLayout -w 250 -h 610 -label "" -borderStyle "etchedIn";
+				columnLayout;	
+					/*
+					checkBoxGrp -cal 1 left -cw3 50 80 80 -numberOfCheckBoxes 2 -label "Type" -labelArray2 "IK Spine" "FK Spine" -v1 1 -v2 1 sofa_rig_bodyTypeCBG;	
+					separator -h 20 -w 250 -style "out";
+					*/
+
+					floatSliderGrp -cal 1 left -cw3 30 50 50 -label "Size" -s 0.1 -field true-minValue -0 -maxValue 10.0 -fieldMinValue -0 -fieldMaxValue 100.0 -value 10 sofa_rig_bodyControlSizeFSG;
+					separator -h 20 -w 250 -style "out";	
+		
+					colorIndexSliderGrp	-cal 1 left -cw 1 75 -cw 2 35 -cw 3 100 -label "Control Color" -min 1 -max 31 -value 18 sofa_rig_bodyControlColorCISG;
+					separator -h 20 -w 250 -style "out";
+					
+					textFieldButtonGrp -cal 1 left -cw3 120 70 50 -label "Main Control" -text $root -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_bodyRootControlTFBG;" sofa_rig_bodyRootControlTFBG;
+						rowLayout -nc 4 -cw4 120 70 25 20;
+						text -l "Root Joint";
+						textField -w 70 -tx "m_root_jnt" sofa_rig_bodyFK_hipJointTF;
+						button -w 25 -l "Get" -c "textField -e -tx `ls -sl` sofa_rig_bodyFK_hipJointTF;" sofa_rig_bodyFK_hipJointTF;				
+					setParent ..;
+
+					rowLayout -nc 4 -cw4 120 70 25 20;
+						text -l "Head End Joint";
+						textField -w 70 -tx "m_headEnd_jnt" sofa_rig_bodyFK_headEndJointTF;
+						button -w 25 -l "Get" -c "textField -e -tx `ls -sl -type joint` sofa_rig_bodyFK_headEndJointTF;" sofa_rig_bodyFK_headEndJointTF;
+					setParent ..;
+					
+					separator -h 20 -w 250 -style "out";					
+			
+					checkBoxGrp -cal 1 left -cw2 50 80 -numberOfCheckBoxes 1 -label1 "FK Spine Rig" -v1 1 sofa_rig_FKbodyTypeCBG;
+					text -l "" -h 10;
+
+					rowLayout -nc 4 -cw4 120 70 25 20;
+						checkBox -l "Lower Torso Joint" -v 1 
+							-onc "button -e -en 1 sofa_rig_bodyFK_lowerTorsoJointTF; textField -e -en 1 sofa_rig_bodyFK_lowerTorsoJointTF;intFieldGrp -e -en 1 sofa_rig_bodyFK_lowerTorsoJointIFG;" 
+							-ofc "button -e -en 0 sofa_rig_bodyFK_lowerTorsoJointTF; textField -e -en 0 sofa_rig_bodyFK_lowerTorsoJointTF;intFieldGrp -e -en 0 sofa_rig_bodyFK_lowerTorsoJointIFG;" 
+							sofa_rig_bodyFK_lowerTorsoJointCB;	
+						textField -w 70 -tx "m_spineA_jnt" sofa_rig_bodyFK_lowerTorsoJointTF;
+						button -w 25 -l "Get" -c "textField -e -tx `ls -sl` sofa_rig_bodyFK_lowerTorsoJointTF;" sofa_rig_bodyFK_lowerTorsoJointTF;
+						intFieldGrp -cw2 1 20 -l "" -v1 1 sofa_rig_bodyFK_lowerTorsoJointIFG;
+					setParent ..;							
+
+					rowLayout -nc 4 -cw4 120 70 25 20;
+						checkBox -l "Waist1 Joint" -v 1 
+							-onc "button -e -en 1 sofa_rig_bodyFK_waist1JointTF ; textField -e -en 1 sofa_rig_bodyFK_waist1JointTF ;intFieldGrp -e -en 1 sofa_rig_bodyFK_waist1JointIFG;" 
+							-ofc "button -e -en 0 sofa_rig_bodyFK_waist1JointTF ; textField -e -en 0 sofa_rig_bodyFK_waist1JointTF ;intFieldGrp -e -en 0 sofa_rig_bodyFK_waist1JointIFG;" 						
+							sofa_rig_bodyFK_waist1JointCB;	
+						textField -w 70 -tx "m_spineB_jnt" sofa_rig_bodyFK_waist1JointTF ;
+						button -w 25 -l "Get" -c "textField -e -tx `ls -sl` sofa_rig_bodyFK_waist1JointTF ;" sofa_rig_bodyFK_waist1JointTF ;
+						intFieldGrp -cw2 1 20 -l "" -v1 1 sofa_rig_bodyFK_waist1JointIFG;
+					setParent ..;
+						
+					rowLayout -nc 4 -cw4 120 70 25 20;
+						checkBox -l "Waist2 Joint" -v 0
+							-onc "button -e -en 1 sofa_rig_bodyFK_waist2JointTF; textField -e -en 1 sofa_rig_bodyFK_waist2JointTF;intFieldGrp -e -en 1 sofa_rig_bodyFK_waist2JointIFG;" 
+							-ofc "button -e -en 0 sofa_rig_bodyFK_waist2JointTF; textField -e -en 0 sofa_rig_bodyFK_waist2JointTF;intFieldGrp -e -en 0 sofa_rig_bodyFK_waist2JointIFG;" 						
+							sofa_rig_bodyFK_waist2JointCB;	
+						textField -en 0 -w 70 -tx "m_spineC_jnt" sofa_rig_bodyFK_waist2JointTF;
+						button -w 25 -en 0 -l "Get" -c "textField -e -tx `ls -sl` sofa_rig_bodyFK_waist2JointTF;" sofa_rig_bodyFK_waist2JointTF;
+						intFieldGrp -en 0 -cw2 1 20 -l "" -v1 1 sofa_rig_bodyFK_waist2JointIFG;
+					setParent ..;
+				
+					rowLayout -nc 4 -cw4 120 70 25 20;
+						checkBox -l "Upper Torso Joint" -v 1 
+							-onc "button -e -en 1 sofa_rig_bodyFK_upperTorsoJointTF; textField -e -en 1 sofa_rig_bodyFK_upperTorsoJointTF;intFieldGrp -e -en 1 sofa_rig_bodyFK_upperTorsoJointIFG;" 
+							-ofc "button -e -en 0 sofa_rig_bodyFK_upperTorsoJointTF; textField -e -en 0 sofa_rig_bodyFK_upperTorsoJointTF;intFieldGrp -e -en 0 sofa_rig_bodyFK_upperTorsoJointIFG;" 					
+							sofa_rig_bodyFK_upperTorsoJointCB;	
+						textField -w 70 -tx "m_spineD_jnt" sofa_rig_bodyFK_upperTorsoJointTF;
+						button -w 25 -l "Get" -c "textField -e -tx `ls -sl` sofa_rig_bodyFK_upperTorsoJointTF;" sofa_rig_bodyFK_upperTorsoJointTF;
+						intFieldGrp -cw2 1 20 -l "" -v1 1 sofa_rig_bodyFK_upperTorsoJointIFG;
+					setParent ..;
+					
+					rowLayout -nc 4 -cw4 120 70 25 20;
+						checkBox 
+							-l "Chest Joint" -v 0 
+							-onc "button -e -en 1 sofa_rig_bodyFK_chestJointTF; textField -e -en 1 sofa_rig_bodyFK_chestJointTF;intFieldGrp -e -en 1 sofa_rig_bodyFK_chestJointIFG;"
+							-ofc "button -e -en 0 sofa_rig_bodyFK_chestJointTF; textField -e -en 0 sofa_rig_bodyFK_chestJointTF;intFieldGrp -e -en 0 sofa_rig_bodyFK_chestJointIFG;"						
+							sofa_rig_bodyFK_chestJointCB;	
+						textField -en 0 -w 70 -tx "m_chest_jnt" sofa_rig_bodyFK_chestJointTF;
+						button -w 25 -en 0 -l "Get" -c "textField -e -tx `ls -sl` sofa_rig_bodyFK_chestJointTF;" sofa_rig_bodyFK_chestJointTF;
+						intFieldGrp -en 0 -cw2 1 20 -l "" -v1 1 sofa_rig_bodyFK_chestJointIFG;
+					setParent ..;
+						
+					rowLayout -nc 4 -cw4 120 70 25 20;
+						checkBox -l "Neck Joint" -v 1 
+							-onc "button -e -en 1 sofa_rig_bodyFK_neckJointTF; textField -e -en 1 sofa_rig_bodyFK_neckJointTF;intFieldGrp -e -en 1 sofa_rig_bodyFK_neckJointIFG;"
+							-ofc "button -e -en 0 sofa_rig_bodyFK_neckJointTF; textField -e -en 0 sofa_rig_bodyFK_neckJointTF;intFieldGrp -e -en 0 sofa_rig_bodyFK_neckJointIFG;"							
+							sofa_rig_bodyFK_neckJointCB;	
+						textField -w 70 -tx "m_neck_jnt" sofa_rig_bodyFK_neckJointTF;
+						button -w 25 -l "Get" -c "textField -e -tx `ls -sl` sofa_rig_bodyFK_neckJointTF;" sofa_rig_bodyFK_neckJointTF;
+						intFieldGrp -cw2 1 20 -l "" -v1 1 sofa_rig_bodyFK_neckJointIFG;
+					setParent ..;
+						
+					rowLayout -nc 4 -cw4 120 70 25 20;
+						checkBox -l "Head Joint" -v 1 
+							-onc "button -e -en 1 sofa_rig_bodyFK_headJointTF; textField -e -en 1 sofa_rig_bodyFK_headJointTF;intFieldGrp -e -en 1 sofa_rig_bodyFK_headJointIFG;"
+							-ofc "button -e -en 0 sofa_rig_bodyFK_headJointTF; textField -e -en 0 sofa_rig_bodyFK_headJointTF;intFieldGrp -e -en 0 sofa_rig_bodyFK_headJointIFG;"				
+							sofa_rig_bodyFK_headJointCB;	
+						textField -w 70 -tx "m_head_jnt" sofa_rig_bodyFK_headJointTF;
+						button -w 25 -l "Get" -c "textField -e -tx `ls -sl` sofa_rig_bodyFK_headJointTF;" sofa_rig_bodyFK_headJointTF;
+						intFieldGrp -cw2 1 20 -l "" -v1 1 sofa_rig_bodyFK_headJointIFG;
+					setParent ..;	
+
+					separator -h 20 -w 250 -style "out";			
+					
+					checkBoxGrp -cal 1 left -cw2 50 80 -numberOfCheckBoxes 1 -label1 "IK Spine Rig" -v1 1 sofa_rig_IKbodyTypeCBG;
+					text -l "" -h 10;
+					
+					columnLayout;	
+						rowLayout -nc 2 -cw2 130 120;
+							textFieldButtonGrp -cal 1 left -cw3 35 60 20 -label "Start" -text "m_spineA_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_spineIKEndJointTFBG;" sofa_rig_spineIKEndJointTFBG;
+							textFieldButtonGrp -cal 1 left -cw3 30 60 20 -label "End" -text "m_chest_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_spineIKStartJointTFBG;" sofa_rig_spineIKStartJointTFBG;
+						setParent ..;	
+						rowLayout -nc 2 -cw2 130 120;
+							textFieldButtonGrp -cal 1 left -cw3 35 60 20 -label "Start" -text "m_neck_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_neckIKEndJointTFBG;" sofa_rig_neckIKEndJointTFBG;
+							textFieldButtonGrp -cal 1 left -cw3 30 60 20 -label "End" -text "m_head_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_neckIKStartJointTFBG;" sofa_rig_neckIKStartJointTFBG;
+						setParent ..;
+					setParent ..;
+			
+					separator -h 20 -w 250 -style "out";					
+
+					button -h 30 -label "Create Spine Rig" -c "int $isIKSpine = `checkBoxGrp -q -v1 sofa_rig_IKbodyTypeCBG`;\
+int $isFKSpine = `checkBoxGrp -q -v1 sofa_rig_FKbodyTypeCBG`;\
+string $FKSpineHip = `textField -q -tx sofa_rig_bodyFK_hipJointTF`;\
+string $FKSpineLowerTorso;if ( `checkBox -q -v sofa_rig_bodyFK_lowerTorsoJointCB` == 1 ) {$FKSpineLowerTorso = `textField -q -tx sofa_rig_bodyFK_lowerTorsoJointTF`;}\
+string $FKSpineWaist1;if ( `checkBox -q -v sofa_rig_bodyFK_waist1JointCB` == 1 ) {$FKSpineWaist1 = `textField -q -tx sofa_rig_bodyFK_waist1JointTF`;}\
+string $FKSpineWaist2;if ( `checkBox -q -v sofa_rig_bodyFK_waist2JointCB` == 1 ) {$FKSpineWaist2 = `textField -q -tx sofa_rig_bodyFK_waist2JointTF`;}\
+string $FKSpineUpperTorso ;if ( `checkBox -q -v sofa_rig_bodyFK_upperTorsoJointCB` == 1 ) {$FKSpineUpperTorso  = `textField -q -tx sofa_rig_bodyFK_upperTorsoJointTF`;}\
+string $FKSpineChest  ;if ( `checkBox -q -v sofa_rig_bodyFK_chestJointCB` == 1 ) {$FKSpineChest  = `textField -q -tx sofa_rig_bodyFK_chestJointTF`;}\
+string $FKSpineNeck  ;if ( `checkBox -q -v sofa_rig_bodyFK_neckJointCB` == 1 ) {$FKSpineNeck = `textField -q -tx sofa_rig_bodyFK_neckJointTF`;}\
+string $FKSpineHead  ;if ( `checkBox -q -v sofa_rig_bodyFK_headJointCB` == 1 ) {$FKSpineHead = `textField -q -tx sofa_rig_bodyFK_headJointTF`;}\
+string $FKSpineHeadEnd  = `textField -q -tx sofa_rig_bodyFK_headEndJointTF`;\
+int $FKSpineRootCtrlNum = 1;\
+int $FKSpineLowerTorsoCtrlNum = `intFieldGrp -q -v1 sofa_rig_bodyFK_lowerTorsoJointIFG`;\
+int $FKSpineWaist1CtrlNum = `intFieldGrp -q -v1 sofa_rig_bodyFK_waist1JointIFG`;\
+int $FKSpineWaist2CtrlNum = `intFieldGrp -q -v1 sofa_rig_bodyFK_waist2JointIFG`;\
+int $FKSpineUpperTorsoCtrlNum = `intFieldGrp -q -v1 sofa_rig_bodyFK_upperTorsoJointIFG`;\
+int $FKSpineChestCtrlNum = `intFieldGrp -q -v1 sofa_rig_bodyFK_chestJointIFG`;\
+int $FKSpineNeckCtrlNum = `intFieldGrp -q -v1 sofa_rig_bodyFK_neckJointIFG`;\
+int $FKSpineHeadCtrlNum = `intFieldGrp -q -v1 sofa_rig_bodyFK_headJointIFG`;\
+string $spineIKEndJoint = `textFieldButtonGrp -q -text sofa_rig_spineIKEndJointTFBG`;\
+string $spineIKStartJoint = `textFieldButtonGrp -q -text sofa_rig_spineIKStartJointTFBG`;\
+string $neckIKEndJoint = `textFieldButtonGrp -q -text sofa_rig_neckIKEndJointTFBG`;\
+string $neckIKStartJoint = `textFieldButtonGrp -q -text sofa_rig_neckIKStartJointTFBG`;\
+string $rootControl = `textFieldButtonGrp -q -text sofa_rig_bodyRootControlTFBG`;\
+int $controlColor = `colorIndexSliderGrp -q -v sofa_rig_bodyControlColorCISG`;\
+float $controlSize = `floatSliderGrp -q -v sofa_rig_bodyControlSizeFSG`;\
+sofa_rig_createBodyRig($isIKSpine,$isFKSpine,$FKSpineHip,$FKSpineLowerTorso,$FKSpineWaist1,$FKSpineWaist2,$FKSpineUpperTorso,$FKSpineChest,$FKSpineNeck,$FKSpineHead,$FKSpineHeadEnd,$FKSpineRootCtrlNum,$FKSpineLowerTorsoCtrlNum,$FKSpineWaist1CtrlNum,$FKSpineWaist2CtrlNum,$FKSpineUpperTorsoCtrlNum,$FKSpineChestCtrlNum,$FKSpineNeckCtrlNum,$FKSpineHeadCtrlNum,$spineIKEndJoint,$spineIKStartJoint,$neckIKEndJoint,$neckIKStartJoint,$rootControl,$controlColor,$controlSize);";
+
+
+
+				setParent ..;
+			setParent ..;		
+		setParent ..;
+		 //------------------------------------------------------------------------------------------------------------------------------------------
+		 
+		 //------------------------------------------------------------------------------------------------------------------------------------------
+		 //Finger Rig Tab UI
+		string $child5 = `scrollLayout`;		
+			frameLayout -w 250 -h 300 -label "" -borderStyle "etchedIn";
+				columnLayout;	
+					
+					radioButtonGrp -cal 1 left -cw3 50 80 80 -numberOfRadioButtons 2 -label "Side" -labelArray2 "Left" "Right" -sl 1 
+					-cc1 "colorIndexSliderGrp -e -v 7 sofa_rig_fingerControlColorCISG; \
+					string $a = `textFieldButtonGrp -q -tx sofa_rig_fingerBaseJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"l_\"+substring($a,3,size($a))) sofa_rig_fingerBaseJointTFBG;"
+					
+					-cc2 "colorIndexSliderGrp -e -v 14 sofa_rig_fingerControlColorCISG; \
+					string $a = `textFieldButtonGrp -q -tx sofa_rig_fingerBaseJointTFBG`; \
+					textFieldButtonGrp -e -tx (\"r_\"+substring($a,3,size($a))) sofa_rig_fingerBaseJointTFBG;"				
+					sofa_rig_fingerSideRBG;
+					separator -h 20 -w 250 -style "out";					
+
+					floatSliderGrp -cal 1 left -cw3 30 50 50 -label "Size" -s 0.1 -field true-minValue -0 -maxValue 10.0 -fieldMinValue -0 -fieldMaxValue 100.0 -value 10 sofa_rig_fingerControlSizeFSG;
+					separator -h 20 -w 250 -style "out";	
+					
+					colorIndexSliderGrp	-cal 1 left -cw 1 75 -cw 2 35 -cw 3 100 -label "Control Color" -min 1 -max 31 -value 7 sofa_rig_fingerControlColorCISG;
+					separator -h 20 -w 250 -style "out";
+					
+					radioButtonGrp -cal 1 left -cw3 85 80 80 -numberOfRadioButtons 2 -label "Rotate Attribte" -labelArray2 "by Curl" "by RotateZ" -sl 1 sofa_rig_fingerCurlTypeRBG;
+					separator -h 20 -w 250 -style "out";	
+
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Finger Base Joint" -text "l_fingerBase_jnt" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_fingerBaseJointTFBG;" sofa_rig_fingerBaseJointTFBG;					
+					textFieldButtonGrp -cal 1 left -cw3 130 80 50 -label "Main Control" -text $root -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] sofa_rig_RootControlTFBG;" sofa_rig_RootControlTFBG;					
+					separator -h 20 -w 250 -style "out";
+					
+					string $createFingerRigBTN = `button -h 30 -label "Create Finger Rig" -c "{int $curlType = `radioButtonGrp -q -sl sofa_rig_fingerCurlTypeRBG`; \
+					int $side = `radioButtonGrp -q -sl sofa_rig_fingerSideRBG`; \
+					float $controlSize = `floatSliderGrp -q -v sofa_rig_fingerControlSizeFSG`; \
+					int $controlColor = `colorIndexSliderGrp -q -v sofa_rig_fingerControlColorCISG`; \
+					string $fingerBaseJoint = `textFieldButtonGrp -q -text sofa_rig_fingerBaseJointTFBG`; \
+					string $rootControl = `textFieldButtonGrp -q -text sofa_rig_RootControlTFBG`; \
+					sofa_rig_createFingerRig( $curlType, $side, $controlSize, $controlColor, $fingerBaseJoint,$rootControl);}"`;
+
+				setParent ..;
+			setParent ..;		
+		setParent ..;
+		 //------------------------------------------------------------------------------------------------------------------------------------------
+
+		//------------------------------------------------------------------------------------------------------------------------------------------
+		 //Finger Rig Tab UI
+		string $child6 = `scrollLayout`;		
+			frameLayout -w 250 -h 270 -label "" -borderStyle "etchedIn";
+				columnLayout;	
+				
+					text -l "Add Extra Control ( Constraint will be ignored )";
+					text -l "" -h 7;		
+					rowLayout -nc 3 -cw3 75 65 50;
+						checkBox -v 1 -label "Translate" addExtraControlTranslateCB;
+						checkBox -v 1 -label "Rotate" addExtraControlRotateCB;
+						checkBox -v 10 -label "Scale" addExtraControlScaleCB;
+					setParent ..;								
+					text -l "1. Auto Add Parent Group for All Selection";		
+						button -label "Add" -w 50 -c "{int $translateChk = `checkBox -q -v addExtraControlTranslateCB`; \
+					int $rotateChk = `checkBox -q -v addExtraControlRotateCB`; \
+					int $scaleChk = `checkBox -q -v addExtraControlScaleCB`; \
+					addExtraParentControl( \"\", \"\",$translateChk,$rotateChk,$scaleChk);}";				
+					text -l "" -h 10;
+					text -l "2. Add Second Control for Current Control";	
+					rowLayout -nc 2 -cw2 120 110;
+						textFieldButtonGrp -cw3 50 40 50 -label "Second" -text "" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] addExtraControlExtraTFBG;" addExtraControlExtraTFBG;
+						textFieldButtonGrp -cw3 50 40 50 -label "Current" -text "" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] addExtraControlCurrentTFBG;" addExtraControlCurrentTFBG;
+					setParent ..;	
+					button -label "Add" -w 50 -c "{string $extraCtrl = `textFieldButtonGrp -q -text addExtraControlExtraTFBG`; \
+					string $currentCtrl = `textFieldButtonGrp -q -text addExtraControlCurrentTFBG`; \
+					int $translateChk = `checkBox -q -v addExtraControlTranslateCB`; \
+					int $rotateChk = `checkBox -q -v addExtraControlRotateCB`; \
+					int $scaleChk = `checkBox -q -v addExtraControlScaleCB`; \
+					addExtraParentControl( $extraCtrl, $currentCtrl,$translateChk,$rotateChk,$scaleChk);}";	
+					
+					separator -h 20 -w 250 -style "out";	
+					
+					text -l "Add Moving Pivot";
+					text -l "" -h 5;
+					textFieldButtonGrp -cw3 50 40 50 -label "Control" -text "" -buttonLabel "Get" -bc "string $sel[]=`ls -sl`;textFieldButtonGrp -e -text $sel[0] addMovingPivotTFBG;" addMovingPivotTFBG;
+					
+					button -label "Add" -w 50 -c "{string $ctrl = `textFieldButtonGrp -q -text addMovingPivotTFBG`; \
+					sofa_rig_createMoveablePivot( 5, $ctrl, \"\", 0);}";					
+					
+				setParent ..;
+			setParent ..;		
+		setParent ..;
+		//-----------------------------------------------------------------------------------------------------------------------------------------
+
+
+		tabLayout -edit -tabLabel $child1 "Template" -tabLabel $child2 "Arm" -tabLabel $child3 "Leg" -tabLabel $child4 "Spine" -tabLabel $child5 "Finger" -tabLabel $child6 "Extra" $tabs;
+	 showWindow $window;	
+}
+
+global proc sofa_rig_createStretchyIK ( string $IKFKSwitchAttr, 	// obj.switch
+										string $ikHandle, 			// ik handle
+										string $controlObj, 		// obj which will move ik handle
+										string $stretchMultiplier,  // This is the "scale" attr for global scaling. Pass "" if not necessary
+										string $cleanObj ) 
+{
+	if (!`objExists $ikHandle`)
+		error ($ikHandle+" doesn't exist." );
+	if (!`objExists $controlObj`)
+		error ($controlObj+" doesn't exist." );
+
+	// Get all joints on this ik joint chain
+	string $jointList[] = `ikHandle -q -jl $ikHandle`;
+	int $sizeJointList = `size $jointList`;
+
+	//We need to add the last joint to this array. We need this for the distance measurement as well as
+	//for parenting the 2nd distance dim locator.
+	string $lastJoint[] = `listRelatives -c -type "joint" $jointList[$sizeJointList - 1]`;
+	$jointList[$sizeJointList] = $lastJoint[0];
+	$sizeJointList = `size $jointList`;
+
+	//Report error if stretchType is "by translation" and joints have a negative length (skip 1st joint in array, because
+	//for this one it doesn matter if it positive or negative (ie, femur, shoulder).
+	for ($j in $jointList)
+	{
+		//Skip 1st joint.
+		if ($j == $jointList[0])
+			continue;
+		else
+		{
+			float $tx = `getAttr ($j+".tx")`;
+			if ( $tx < 0 )
+				error ("The translate X value of "+$j+" is less than 0 .");
+		}
+	}		
+
+	//Get the length of each joint (should be equal to the .tx of each joint큦 first child, but that큦 not important right now).
+	int $i;
+	float $jointLength[];
+	for ($i = 0; $i < ($sizeJointList - 1); $i++)	
+		$jointLength[$i] = sofa_rig_getDistance( $jointList[$i], $jointList[$i+1] );	
+
+	//Get the total length of the IK chain.
+	float $chainLength = 0;
+	for ($length in $jointLength)
+		$chainLength += $length;
+
+	//DO THAT DISTANCEDIMENSION THANG.
+	//1: CREATE LOCATOR1 NEEDED FOR DISTANCEDIMENSION NODE.
+	string $dimensionLocator1[] = `spaceLocator -p 0 0 0 -n ($controlObj + "_Stretch_Locator1")`;
+	string $dimensionLocator1Shape[] = `listRelatives -s $dimensionLocator1[0]`;
+	//parent $dimensionLocator1[0] $jointList[0];
+	pointConstraint $jointList[0] $dimensionLocator1[0];
+	setAttr ($dimensionLocator1[0] + ".v") 0;
+	sofa_rig_setLockAttributes( 1, $dimensionLocator1[0], "tx ty tz rx ry rz sx sy sz v");
+	sofa_rig_setHideAttributes( 1, $dimensionLocator1[0], "tx ty tz rx ry rz sx sy sz v");	
+	if (`objExists $cleanObj`)
+		parent $dimensionLocator1[0] $cleanObj;
+
+	//2: CREATE LOCATOR2 NEEDED FOR DISTANCEDIMENSION NODE.
+	string $dimensionLocator2[] = `spaceLocator -p 0 0 0 -n ($controlObj + "_Stretch_Locator2")`;
+	string $dimensionLocator2Shape[] = `listRelatives -s $dimensionLocator2[0]`;
+	//NOTE: We don't want to point constrain this to the control obj. The control obj might NOT be in the same place as the last joint.
+	//Instead, move it to the position of the last joint.
+	float $lastJointPosition[] = `xform -q -ws -rp $jointList[$sizeJointList - 1]`;
+	move -rpr $lastJointPosition[0] $lastJointPosition[1] $lastJointPosition[2] $dimensionLocator2[0];
+	pointConstraint -mo -weight 1 $controlObj $dimensionLocator2[0];
+	setAttr ($dimensionLocator2[0] + ".v") 0;
+	sofa_rig_setLockAttributes( 1, $dimensionLocator2[0], "tx ty tz rx ry rz sx sy sz v");	
+	sofa_rig_setHideAttributes( 1, $dimensionLocator2[0], "tx ty tz rx ry rz sx sy sz v");	
+	if (`objExists $cleanObj`)
+		parent $dimensionLocator2[0] $cleanObj;
+
+	//3: CREATE DISTANCEDIMENSION NODE TO MEASURE DISTANCE BETWEEN SHOULDER AND IK HANDLE.
+	//NOTE*: THIS MUST BE PASSED THROUGH A UNITCONVERSION NODE IN ORDER FOR THE CORRECT VALUE TO BE OUTPUT.
+	//UNFORTUNATELY DISTANCEDIMENSION NODE ONLY OUTPUTS CENTIMETERS!!! :(
+	string $distanceDimNode = `createNode -n ($controlObj + "_IKDistanceDimension") distanceDimShape`;
+	string $distanceDimNodeTransform[] = `listRelatives -p $distanceDimNode`;
+	connectAttr ($dimensionLocator1Shape[0] + ".worldPosition[0]") ($distanceDimNode + ".startPoint");
+	connectAttr ($dimensionLocator2Shape[0] + ".worldPosition[0]") ($distanceDimNode + ".endPoint");
+	setAttr ($distanceDimNodeTransform[0] + ".v") 0;		
+	sofa_rig_setLockAttributes( 1, $distanceDimNodeTransform[0], "tx ty tz rx ry rz sx sy sz v");
+	sofa_rig_setHideAttributes( 1, $distanceDimNodeTransform[0], "tx ty tz rx ry rz sx sy sz v");
+	if (`objExists $cleanObj`)
+		parent $distanceDimNodeTransform[0] $cleanObj;
+
+	//CREATE DIVIDE NODE. THIS DIVIDES THE LENGTH OF IKHANDLE->SHOULDER BY THE ORIGINAL LENGTH OF THE ARM.
+	//THIS IS USED FOR STRETCHING.
+	string $stretchLengthDivide = `createNode -n ($controlObj + "_Stretch_Length_Divide") multiplyDivide`;
+	setAttr ($stretchLengthDivide + ".operation") 2;
+
+	//CREATE UNITCONVERSION NODE TO CONVERT DISTANCEDIMENSION "DISTANCE". SET UNITCONVERSION VALUE BASED ON CURRENTUNITS.
+	float $conversionFactor = sofa_rig_getLinearUnitConversion();	
+	string $conversionNode = `createNode -n ($controlObj + "_Stretch_UnitConversion") unitConversion`;
+	setAttr ($conversionNode + ".conversionFactor") $conversionFactor;
+	connectAttr ($distanceDimNode + ".distance") ($conversionNode + ".input");   
+	connectAttr ($conversionNode + ".output") ($stretchLengthDivide + ".input1X");
+		
+	string $stretchScaleMultiplier = ($controlObj + "_Stretch_Scale_Multiplier") ;
+	createNode -n $stretchScaleMultiplier multiplyDivide;
+	setAttr ($stretchScaleMultiplier+".input1X") 1;
+	setAttr ($stretchScaleMultiplier+".input2X") $chainLength;
+	connectAttr -f ($stretchScaleMultiplier+".outputX") ($stretchLengthDivide+".input2X");
+	if ( `objExists $stretchMultiplier` ) // if root control exist, connect it to be the scaler of stretch
+		connectAttr -f ($stretchMultiplier+".scale") ($stretchScaleMultiplier+".input1");	
+		
+
+	//NOW CALCULATE IK JOINTS?LENGTHS BASED ON THE FREAKY STRETCHVARIABLE_CONDITION NODE.
+	for ($i = 1; $i < ($sizeJointList); $i++)
+	{				
+		$conditionNodeName = `createNode condition`;
+
+		//Set condition operation.
+		setAttr ($conditionNodeName + ".operation") 2; // greater than
+
+		//Connect firstTerm of condition. Use setAttr to set secondTerm.
+		connectAttr ($stretchLengthDivide + ".outputX") ($conditionNodeName + ".firstTerm");
+		setAttr ($conditionNodeName + ".secondTerm") 1;
+
+		//Connect colorIfTrueR. Use setAttr to set colorIfFalseR.
+		connectAttr ($stretchLengthDivide + ".outputX") ($conditionNodeName + ".colorIfTrueR");
+		setAttr ($conditionNodeName + ".colorIfFalseR") 1;	
+	
+		//CREATE MULTIPLY NODE 1 IF IT DOESN큈 ALREADY EXIST.
+		string $multiplyNode1Name = `createNode multDoubleLinear`;	
+		setAttr ($multiplyNode1Name + ".input2") $jointLength[$i-1];
+		connectAttr ($conditionNodeName + ".outColorR") ($multiplyNode1Name + ".input1");		
+
+		//CREATE MULTIPLY NODE 2 IF IT DOESN큈 ALREADY EXIST. WE NEED THIS FOR CONTROLLING STRETCH ON INDIVIDUAL JOINTS.	
+		string $multiplyNode2Name = `createNode multDoubleLinear`;
+		setAttr ($multiplyNode2Name + ".input2") 1;
+		connectAttr ($multiplyNode1Name + ".output") ($multiplyNode2Name + ".input1");
+
+		//Create clamp node.
+		string $clampNodeName = `createNode clamp`;	
+		setAttr ($clampNodeName + ".minR") $jointLength[$i-1];
+		setAttr ($clampNodeName + ".maxR") 1;	
+		connectAttr ($multiplyNode2Name + ".output") ($clampNodeName + ".inputR");	
+
+		//Now create the attr on $clampControlObj and make connections. This allows user to adjust the amount of stretching.
+		//A setRange node is created here, placed between the objAttr and the conditionClamp node.	
+		if (! `attributeExists "IKStretch_Control" $controlObj`)
+			addAttr -k true -ln "IKStretch_Control" -at double  -min 0 -max 10 -dv 10 $controlObj;
+		
+		string $attrSetRangeNodeName = `createNode setRange`;
+		setAttr ($attrSetRangeNodeName + ".minX") $jointLength[$i-1];
+		setAttr ($attrSetRangeNodeName + ".maxX") ($jointLength[$i-1] * 10);
+		setAttr ($attrSetRangeNodeName + ".oldMinX") 0;
+		setAttr ($attrSetRangeNodeName + ".oldMaxX") 10;			
+		
+		connectAttr ($controlObj + ".IKStretch_Control") ($attrSetRangeNodeName + ".valueX");	
+		connectAttr ($attrSetRangeNodeName + ".outValueX") ($clampNodeName + ".maxR");
+		
+		//Now add individual stretch attrs for upper and lower.
+		addAttr -k true -ln ("Stretch_" + $jointList[$i]) -at double  -dv 1 $controlObj;
+		connectAttr ($controlObj + ".Stretch_" + $jointList[$i]) ($multiplyNode2Name + ".input2");	
+
+		// Test if the translateX of joint is connected. If does, we need to create extra blend node to blend FK and IK stretch
+		string $tmp[] = `listConnections -p 1 -d 0 -s 1 ($jointList[$i]+".tx")`;
+		if ( size($tmp[0]) > 0 )
+		{
+			string $colorBlend = `shadingNode -asUtility blendColors`;
+			connectAttr -f $tmp[0] ($colorBlend + ".color2R");	
+			connectAttr -f ($clampNodeName + ".outputR") ($colorBlend + ".color1R");			
+			connectAttr -f ($colorBlend + ".outputR")  ($jointList[$i]+".tx");
+			connectAttr -f $IKFKSwitchAttr ($colorBlend+".blender");
+		}		
+		else
+			connectAttr ($clampNodeName + ".outputR") ($jointList[$i] + ".tx");		
+	}
+}
+
+global proc sofa_rig_createFingerRig( int $curlType, int $side,  float $controlSize, int $controlColor, string $fingerBaseJoint, string $rootControl )
+{		
+	select -cl;
+	sofa_rig_templateExistanceCheck;
+	global string $gTemplateAll, $gTemplateSkeleton, $gTemplateControl, $gTemplateRig;
+	global int $useNewNamingRule;
+											
+	$controlColor--;
+	string $prefix = sofa_rig_getPrefixName($side);
+	
+	$rootControl = sofa_rig_getRealRootControl($rootControl);
+	
+	if (!`objExists $fingerBaseJoint`)
+		error ($fingerBaseJoint+" doesn't exist.");
+	
+	//rename
+	string $fingerType[];
+	if(!$useNewNamingRule)
+		$fingerType = { "Thumb", "Index", "Middle", "Ring", "Pinky" };
+	else
+		$fingerType = { "thumb", "index", "middle", "ring", "pinky" };
+	
+	
+	// The finger type will be recongized by it's order in DAG 
+	string $fingerBaseChildJoints[] = `listRelatives -c -typ joint $fingerBaseJoint`;
+	int $index = 0;
+	for ( $fingerJoint in $fingerBaseChildJoints )
+	{
+		// give the name with "extra" if the number of finger childs are more than we expect
+		string $name;
+		if ( $index >= size($fingerType) )
+			$name = ( "extra" + ($index-size($fingerType)+1) );
+		else
+			$name = $fingerType[$index]; 
+		
+		string $FKFingerControl, $FKInHandControl;
+		//rename	
+		if(!$useNewNamingRule)
+		{
+			$FKFingerControl = ($prefix+$name+"_Control");
+			$FKInHandControl = ($prefix+$name+"_Control_0");
+		}
+		else
+		{
+			$FKFingerControl = ($prefix+$name+"_ctl_fk");
+			$FKInHandControl = ($prefix+$name+"Base_ctl_fk");
+		}
+			
+		// get all childs on current finger joint chain
+		string $fingerJointsChain[];
+		string $childJoints[] = `listRelatives -c -typ joint $fingerJoint`;
+		string $nextJoint = $childJoints[0];
+		int $id = 0;
+		while ( $nextJoint != "" )
+		{
+			$fingerJointsChain[$id] = $nextJoint;
+			$id++;
+			clear $childJoints;
+			$childJoints = `listRelatives -c -typ joint $nextJoint`;
+			$nextJoint = $childJoints[0];
+		}		
+		if ( size($fingerJointsChain) < 4 )
+			error "Joint number of current finger joint chain is less than 4.";			
+				
+		string $inHandFingerJoint = $fingerJoint;
+		string $Finger1Joint = $fingerJointsChain[size($fingerJointsChain)-4];
+		string $Finger2Joint = $fingerJointsChain[size($fingerJointsChain)-3];
+		string $Finger3Joint = $fingerJointsChain[size($fingerJointsChain)-2];
+		string $fingerEndJoint = $fingerJointsChain[size($fingerJointsChain)-1];
+		
+		//	Measure the joint to get the length of control
+		float $controlLength = sofa_rig_getDistance( $Finger1Joint, $fingerEndJoint );
+		
+		// Create finger control
+		if ( $curlType == 1 )
+		{		
+			string $result[] = sofa_rig_createControl( $fingerJoint, 1, $fingerJointsChain[size($fingerJointsChain)-4], 0, "", $FKFingerControl, 14, $controlColor, 0,  "", "", 0, 1, $rootControl, $side, $controlSize, ($controlLength/2), 0, 0, 0, 0, 0, 0,0,0,0, ("m_bodyCtl_set "+tolower($prefix)+"armCtl_set") );
+			setAttr ($FKFingerControl+".sz") ($controlLength/2);
+			makeIdentity -apply true -t 0 -r 0 -s 1 -n 0 $FKFingerControl;	
+			parentConstraint -mo -skipTranslate x -skipTranslate y -skipTranslate z -skipRotate y -weight 1 $result[0] $fingerJointsChain[size($fingerJointsChain)-4];
+			sofa_rig_setLockAttributes( 1, $result[0], "tx ty tz ry sx sy sz v" );
+			sofa_rig_setHideAttributes( 1, $result[0], "tx ty tz ry sx sy sz v" );
+			addAttr -ln "curl1" -k 1 -at double $FKFingerControl;	
+			addAttr -ln "curl2" -k 1 -at double $FKFingerControl;	
+			addAttr -ln "curl3" -k 1 -at double $FKFingerControl;
+			connectAttr -f ($FKFingerControl+".curl1") ($fingerJointsChain[size($fingerJointsChain)-4]+".ry");
+			connectAttr -f ($FKFingerControl+".curl2") ($fingerJointsChain[size($fingerJointsChain)-3]+".ry");
+			connectAttr -f ($FKFingerControl+".curl3") ($fingerJointsChain[size($fingerJointsChain)-2]+".ry");
+		}
+		else if ( $curlType == 2 )
+		{
+			string $result[] = sofa_rig_createControl( $fingerJoint, 1, $fingerJointsChain[size($fingerJointsChain)-4], 1, "", $FKFingerControl, 14, $controlColor, 0,  "", "", 0, 1, $rootControl, $side, $controlSize, ($controlLength/2), 0, 0, 0,0,0,90, 0, 0, 0, ("m_bodyCtl_set "+tolower($prefix)+"armCtl_set") );	
+			
+			sofa_rig_setLockAttributes( 0, $FKFingerControl, "sy" );
+			sofa_rig_setHideAttributes( 0, $FKFingerControl, "sy" );
+			setAttr -k 1 ($FKFingerControl+".sy");
+			setAttr ($FKFingerControl+".sy") ($controlLength/2);
+			//makeIdentity -apply true -t 0 -r 0 -s 1 -n 0 $FKFingerControl;	
+			sofa_rig_setLockAttributes( 1, $FKFingerControl, "sy" );	
+			sofa_rig_setHideAttributes( 1, $FKFingerControl, "sy" );
+		
+			// Add attr to control second and third joints of finger
+			addAttr -ln "curl2" -k 1 -at double $FKFingerControl;	
+			string $multDoubleLinear1 = `createNode -n ($FKFingerControl+"_"+$name+"1_multiply") multDoubleLinear`;
+			connectAttr -f ($FKFingerControl+".curl2") ($multDoubleLinear1+".input1");
+			setAttr ($multDoubleLinear1+".input2") -10;
+			connectAttr -f ($multDoubleLinear1+".output") ($fingerJointsChain[size($fingerJointsChain)-3]+".ry");
+			
+			addAttr -ln "curl3" -k 1 -at double $FKFingerControl;	
+			string $multDoubleLinear2 = `createNode -n ($FKFingerControl+"_"+$name+"2_multiply") multDoubleLinear`;
+			connectAttr -f ($FKFingerControl+".curl2") ($multDoubleLinear2+".input1");
+			setAttr ($multDoubleLinear2+".input2") -10;
+			connectAttr -f ($multDoubleLinear2+".output") ($fingerJointsChain[size($fingerJointsChain)-2]+".ry");
+		}
+		
+		// Create InHand control
+		if ( $side == 1 )
+			$result = sofa_rig_createControl( $fingerBaseJoint, 1, $inHandFingerJoint, 1, "", $FKInHandControl, 1, $controlColor, 0, "", "",0 , 1, $rootControl, $side, ($controlLength*$controlSize/15), 0, (0.5*$controlLength),0, 0, 0, 0, 0,0,0,0, ("m_bodyCtl_set "+tolower($prefix)+"armCtl_set") );	
+		else if ( $side == 2 )
+		$result = sofa_rig_createControl( $fingerBaseJoint, 1, $inHandFingerJoint, 1, "", $FKInHandControl, 1, $controlColor, 0, "", "",0 , 1, $rootControl, $side, ($controlLength*$controlSize/15), 0, (0.5*$controlLength),0, 0, 0, 0, 0,0,0,0, ("m_bodyCtl_set "+tolower($prefix)+"armCtl_set") );	
+		
+		$index++;
+	}
+	select -cl;	
+}
+
+global proc sofa_rig_createBodyRig( int $isIKSpine,
+									int $isFKSpine,
+									string $hipJoint, 
+									string $lowerTorsoJoint,
+									string $waistJoint1,
+									string $waistJoint2,
+									string $upperTorsoJoint,
+									string $chestJoint,
+									string $neckJoint,
+									string $headJoint,
+									string $headEndJoint,
+									int $FKSpineRootCtrlNum,
+									int $FKSpineLowerTorsoCtrlNum,
+									int $FKSpineWaist1CtrlNum,
+									int $FKSpineWaist2CtrlNum,
+									int $FKSpineUpperTorsoCtrlNum,
+									int $FKSpineChestCtrlNum,
+									int $FKSpineNeckCtrlNum,
+									int $FKSpineHeadCtrlNum,
+									string $spineStartJoint,
+									string $spineEndJoint,
+									string $neckStartJoint,
+									string $neckEndJoint,									
+									string $rootControl,
+									int $controlColor,
+									float $controlSize )
+{	
+	if (!`objExists $hipJoint`)	
+		error ("Joint "+$hipJoint+" doesn't exist.");
+		
+	if (!`objExists $headEndJoint`)	
+		error ("Joint "+$headEndJoint+" doesn't exist.");
+		
+	if (!`objExists $rootControl`)	
+		error ("Control "+$rootControl+" doesn't exist.");
+		
+	if( !$isIKSpine && !$isFKSpine )
+		return;	
+	
+	select -cl;
+	sofa_rig_templateExistanceCheck;
+	
+	global string $gTemplateAll, $gTemplateTransformA, $gTemplateTransformB, $gTemplateTransformC, $gTemplateDeformer, $gTemplateRig, $gTemplateGeometry, 
+	$gTemplateControl, $gTemplateSkeleton, $gTemplateBody_rig, $gTemplateFacial_rig, $gTemplateBody_control, $gTemplateFacial_control, $gTemplateBody_skeleton, 
+	$gTemplateFacial_skeleton;
+	global int $useNewNamingRule;
+											
+	$controlColor--;	
+	$rootControl = sofa_rig_getRealRootControl($rootControl);
+	string $prefix = sofa_rig_getPrefixName(0);
+	
+	//rename
+	string $bodyControlString[];
+	if(!$useNewNamingRule)
+		$bodyControlString = { "COG", "BOTTOM", "LOWER_TORSO", "WAIST1", "WAIST2", "UPPER_TORSO", "CHEST", "NECK", "HEAD" };
+	else
+		$bodyControlString = { "root", "hip", "lowerTorso", "waist1", "waist2", "upperTorso", "chest", "neck", "head" };	
+
+	//rename
+	string $cogControl;
+	if(!$useNewNamingRule)
+		$cogControl = ($bodyControlString[0]+"_CONTROL");
+	else
+		$cogControl = ($prefix+$bodyControlString[0]+"_ctl_fk");	
+
+	// IK control name
+	string $IKHeadControl = ($prefix+"head_ctl_ik");
+	string $IKNeckControl = ($prefix+"neck_ctl_ik");
+	string $IKChestControl = ($prefix+"chest_ctl_ik");
+	string $IKSpineControl = ($prefix+"spine");
+	string $IKHipControl = ($prefix+"hip_ctl_ik");
+		
+	string $spineRig = `group -em -n ($prefix+"spine_rig")`;
+	string $spineScaleRig = `group -em -n ($prefix+"spine_scale_rig")`;
+	parent $spineRig $gTemplateBody_rig;
+	parent $spineScaleRig $spineRig;
+	scaleConstraint -offset 1 1 1 -weight 1 $rootControl $spineScaleRig;
+
+	// Create upperBody control connect with nothing
+	float $tmpRot[3];
+	$tmpRot = sofa_rig_getRotationFromChildJointDirection( $hipJoint );
+	string $result[] = sofa_rig_createControl( "", 0, $hipJoint, 0, "", $cogControl, 9, $controlColor, 0, "", "", 0, 0, $gTemplateControl, 0, $controlSize, 0, -0.1, 0, $tmpRot[0], $tmpRot[1], $tmpRot[2], 0,0,0,0, "m_bodyCtl_set m_torsoCtl_set");
+	
+	sofa_rig_setLockAttributes( 1, $cogControl, "sx sy sz v" );
+	sofa_rig_setHideAttributes( 1, $cogControl, "sx sy sz v" );
+	parent $result[2] $rootControl;
+	parentConstraint -mo -weight 1 $rootControl $result[2];
+
+	addAttr -ln "IKFK_Blend" -at double -dv 1 -min 0 -max 1 $cogControl;
+	setAttr -e -keyable true ($cogControl+".IKFK_Blend");	
+	string $IKFK_Blend_Reverse = `shadingNode -n "IKFK_Blend_Reverse" -asUtility reverse`;
+	connectAttr -f ($cogControl+".IKFK_Blend") ($IKFK_Blend_Reverse+".inputX");	
+	
+	string $FKJointList[];
+	if ($isFKSpine) // if FK spine
+	{
+		// by geting long name we can retrive all its parents
+		string $tmp[] = `ls -l $headEndJoint`;
+		string $jointLongName = $tmp[0];
+		string $jointList[] = stringToStringArray($jointLongName, "|");
+		int $index = 0;		
+		
+		string $FKhipJoint, $FKlowerTorsoJoint, $FKwaistJoint1, $FKwaistJoint2, $FKupperTorsoJoint, $FKchestJoint, $FKneckJoint, $FKheadJoint, $FKheadEndJoint;
+
+		//  duplicate new joint chain for IK spline
+		string $childJoint;
+		for ( $i = size($jointList)-1; $i >= 0; $i-- )
+		{
+			// duplicate joint without childs
+			$tmp = `duplicate -po -n ("FK"+$jointList[$i]) $jointList[$i]`;
+			// parent last duplicated joint to current
+			if ( `objExists $childJoint`)
+				parent $childJoint $tmp[0];
+			$childJoint = $tmp[0];			
+			
+			if ( $i != size($jointList)-1 )
+			{
+				$FKJointList[$index] = $tmp[0];
+				$index++;
+			}
+			
+			// skip all joints or objs after hipJoint 
+			if ( $jointList[$i] == $hipJoint )
+			{
+				$FKhipJoint = $tmp[0];
+				setAttr ($FKhipJoint+".v") 0;
+				break;
+			}			
+			
+			// skip all joints or objs after hipJoint 
+			if ( $jointList[$i] == $hipJoint )
+				break;
+			if ( $jointList[$i] == $lowerTorsoJoint )
+				$FKlowerTorsoJoint = $tmp[0];
+			if ( $jointList[$i] == $waistJoint1 )
+				$FKwaistJoint1 = $tmp[0];	
+			if ( $jointList[$i] == $waistJoint2 )
+				$FKwaistJoint2 = $tmp[0];	
+			if ( $jointList[$i] == $upperTorsoJoint )
+				$FKupperTorsoJoint = $tmp[0];	
+			if ( $jointList[$i] == $chestJoint )
+				$FKchestJoint = $tmp[0];	
+			if ( $jointList[$i] == $neckJoint )
+				$FKneckJoint = $tmp[0];	
+			if ( $jointList[$i] == $headJoint )
+				$FKheadJoint = $tmp[0];
+			if ( $jointList[$i] == $headEndJoint )
+				$FKheadEndJoint = $tmp[0];	
+		}	
+		
+		int $enableList[];
+		clear $jointList;
+		int $controlNumList[];	
+		string $tempJointArray[] = { $FKhipJoint, $FKlowerTorsoJoint, $FKwaistJoint1, $FKwaistJoint2, $FKupperTorsoJoint, $FKchestJoint, $FKneckJoint, $FKheadJoint, $FKheadEndJoint };
+		int $temp2[] = { $FKSpineRootCtrlNum, $FKSpineLowerTorsoCtrlNum, $FKSpineWaist1CtrlNum, $FKSpineWaist2CtrlNum, $FKSpineUpperTorsoCtrlNum, $FKSpineChestCtrlNum, $FKSpineNeckCtrlNum, $FKSpineHeadCtrlNum };
+	
+		
+		int $j = 1;
+		int $k = 1;
+		int $w = 1;
+		$enableList[0] = 1;
+		$controlNumList[0] = 1;
+		for ( $b = 0; $b < size($tempJointArray); $b++ )
+		{
+			if ( $tempJointArray[$b] == "" )
+			{				
+				$enableList[$j] = 0;
+				$j++;
+				$controlNumList[$w] = 1;
+				$w++;	
+			}
+			else
+			{
+				$enableList[$j] = 1;
+				$j++;
+				$jointList[$k-1] = $tempJointArray[$b];
+				$k++;
+				$controlNumList[$w] = $temp2[$b];
+				$w++;			
+			}
+		}
+		
+		//find all joints in the spine chain
+		string $tmp[1] = `ls -l $FKheadEndJoint`;
+		string $kkk[] = stringToStringArray($tmp[0], "|");
+		string $jointArray[];
+		int $c = 0;
+		int $isHipJointFound = 0;
+		for ( $a = 0; $a < size($kkk); $a++ )
+		{
+			if ( $kkk[$a] == $FKhipJoint )
+				$isHipJointFound = 1;
+			if ($isHipJointFound)
+			{
+				$jointArray[$c] = $kkk[$a];
+				$c++;
+			}
+		}
+	
+		int $controlCount = 1;
+		int $index = 0;
+		$k = 0;
+		$j = 0;		
+		// Looping the string array of body to create the spine controls
+		for( $j = 1; $j < size($bodyControlString); $j++ )
+		{
+			if ($enableList[$j])
+			{		
+				int $jointNum = 0;
+				int $isStartJointFound = 0;				
+				for ( $a = 0; $a < size($jointArray); $a++ )
+				{
+					if ( $jointArray[$a] == $jointList[$k+1] )
+						break;
+					if ( $jointArray[$a] == $jointList[$k] )
+						$isStartJointFound = 1;
+					if ($isStartJointFound == 1)
+						$jointNum++;
+				}			
+					
+				// if nothing were found between joints, go to next loop
+				if ($jointNum == 0)
+				{
+					warning ("Can't find any joints between "+$jointList[$k]+" and "+$jointList[$k+1]+".");
+					continue;
+				}
+				
+				//compare joint number with how many control user request
+				if ( $controlNumList[$j] > $jointNum )
+					$controlNumList[$j] = $jointNum;			
+
+				int $packet = $jointNum/$controlNumList[$j];
+				int $remain = 0;
+				if ( ($jointNum%(float)$controlNumList[$j]) > 0 )
+					$remain = $jointNum%$controlNumList[$j];
+				
+				//create contrl for $thisStartJoint+$packet	
+				for ( $i = 0; $i < $controlNumList[$j]; $i++ )
+				{		
+					string $controlName;
+					if(!$useNewNamingRule)
+					{
+						$controlName = ($bodyControlString[$j]+"_CONTROL");
+						if( $controlNumList[$j] > 1 )
+							$controlName = ($bodyControlString[$j]+($i+1)+"_CONTROL");	
+					}
+					else
+					{
+						$controlName = ($prefix+$bodyControlString[$j]+"_ctl_fk");
+						if( $controlNumList[$j] > 1 )
+							$controlName = ($prefix+$bodyControlString[$j]+($i+1)+"_ctl_fk");
+					}
+
+					string $thisStartJoint = $jointArray[$index];
+					string $thisEndJoint;
+				
+					// if this is the last loop, the reminder should be considered
+					if ( $i == ($controlNumList[$j]-1) )
+						$packet += $remain;
+						
+					int $endNum = $index + $packet;
+						
+					// if the  index of joints excess the total joint number
+					if( $endNum >= size($jointArray) )				
+						$thisEndJoint = $FKheadEndJoint;				
+					else
+						$thisEndJoint = $jointArray[$endNum];
+
+					string $buf[1] = `listRelatives -p $thisStartJoint`;					
+					
+					if( $controlCount == 1 ) // BOTTOM CONTROL's parent should be COG CONTROL
+						$buf[0] = $cogControl;
+						
+					if( $controlCount == 2 ) // the CONTROL next to BOTTOM, its parent shouldn't be constrainted					
+						$buf[0] = $cogControl;					
+					
+					// get extra orientation, the Y axis should point to its child joint
+					$tmpRot = sofa_rig_getRotationFromChildJointDirection( $thisStartJoint );									
+					// create control
+					string $result[] = sofa_rig_createControl( $buf[0], 1, $thisStartJoint, 1, $thisEndJoint, $controlName, 10, $controlColor, 1, $rootControl, $spineScaleRig, 1, 0, $cogControl, 0, $controlSize,0, 0, 0, $tmpRot[0], $tmpRot[1], $tmpRot[2], 0,0,0,0, "m_bodyCtl_set m_fkCtl_set m_torsoCtl_set");
+										
+					sofa_rig_setHideAttributes( 1, $controlName, "tx ty tz" );
+					sofa_rig_setLockAttributes( 1, $controlName, "tx ty tz" );
+					connectAttr -f ($IKFK_Blend_Reverse+".outputX") ($controlName+".v");	
+					
+					// jump index of joint to next control
+					$index += $packet;
+					$controlCount++;
+				}
+				$k++;
+			}
+		}
+	}
+
+	string $IKJointList[];
+	if ($isIKSpine) // if IK spine
+	{
+		if (!`objExists $spineStartJoint`)
+			error ($spineStartJoint+" doesn't exist." );
+			
+		if (!`objExists $spineEndJoint`)
+			error ($spineEndJoint+" doesn't exist." );
+			
+		if (!`objExists $neckStartJoint`)
+			error ($neckStartJoint+" doesn't exist." );
+			
+		if (!`objExists $neckEndJoint`)
+			error ($neckEndJoint+" doesn't exist." );
+
+			
+		string $tmp[];
+		string $jointLongName;
+		string $jointList[];
+		int $index;		
+		
+		/* create IK spline handle for spine*/
+		// by geting long name we can retrive all its parents
+		$tmp = `ls -l $spineEndJoint`;
+		$jointLongName = $tmp[0];
+		$jointList = stringToStringArray($jointLongName, "|");
+		string $IKSpineJointList[];
+		$index = 0;
+		
+		//  duplicate new joint chain for IK spline
+		for ( $i = size($jointList)-1; $i >= 0; $i-- )
+		{			
+			// store to another array
+			$IKSpineJointList[$index] = ($jointList[$i]);
+			// 	We need 2 extra joint as the start and end joints of IK spline
+			if ( $jointList[$i] == $spineEndJoint )
+			{
+				$IKSpineJointList[$index+1] =  ($jointList[$i]);
+				$index++;			
+			}			
+			// skip all joints or objs after spineEndJoint 
+			if ( $jointList[$i] == $spineStartJoint )
+			{
+				$IKSpineJointList[$index+1] =  ($jointList[$i]);
+				break;
+			}	
+			$index++;
+		}	
+			
+		string $childJoint;
+		for ( $i = size($IKSpineJointList)-1; $i >= 0; $i-- )
+		{
+			// duplicate joint without childs
+			$tmp = `duplicate -po -n ("IK"+$IKSpineJointList[$i]) $IKSpineJointList[$i]`;
+			// parent last duplicated joint to current
+			if ( `objExists $childJoint`)
+				parent $tmp[0] $childJoint;
+			$childJoint = $tmp[0];			
+			
+			$IKSpineJointList[$i] = $tmp[0];			
+		}
+		
+		// parent new duplicated joint chain to rig grp
+		parent $IKSpineJointList[size($IKSpineJointList)-1] $gTemplateBody_skeleton;	
+		// make invisiable
+		setAttr ($IKSpineJointList[size($IKSpineJointList)-1]+".v") 0;
+		
+		// This single joint is the IK hip
+		$tmp = `duplicate -po -n ("IK"+$hipJoint) $hipJoint`;
+		string $IKhipJoint = $tmp[0];
+		setAttr ($IKhipJoint+".v") 0;
+		
+		// The 2 extra joints must be in one straight line
+		rename $IKSpineJointList[0] "spineIKSplineEnd";
+		$IKSpineJointList[0] = "spineIKSplineEnd";
+		parent $IKSpineJointList[0] $IKSpineJointList[2];
+		float $dis = `getAttr ($IKSpineJointList[1]+".tx")`;
+		setAttr ($IKSpineJointList[0]+".t") ($dis *1.1) 0 0;
+		parent $IKSpineJointList[0] $IKSpineJointList[1];		
+		
+		rename $IKSpineJointList[size($IKSpineJointList)-1] "spineIKSplineStart";
+		$IKSpineJointList[size($IKSpineJointList)-1] = "spineIKSplineStart";
+		parent $IKSpineJointList[size($IKSpineJointList)-2] $gTemplateBody_skeleton;		
+		parent $IKSpineJointList[size($IKSpineJointList)-1] $IKSpineJointList[size($IKSpineJointList)-3];		
+		$dis = `getAttr ($IKSpineJointList[size($IKSpineJointList)-3]+".tx")`;
+		setAttr ($IKSpineJointList[size($IKSpineJointList)-1]+".t") ($dis *(-1.1)) 0 0;		
+		parent $IKSpineJointList[size($IKSpineJointList)-1] $gTemplateBody_skeleton;
+		parent $IKSpineJointList[size($IKSpineJointList)-2] $IKSpineJointList[size($IKSpineJointList)-1];
+		
+		// Create IK Spline handle and bind skin to extra joints
+		global string $gSelect;
+		setToolTo $gSelect;
+		clear $result;		
+		$result = `ikHandle -sol ikSplineSolver -n ("spine_IKSplineHandle") -startJoint $IKSpineJointList[size($IKSpineJointList)-1] -endEffector $IKSpineJointList[0] -parentCurve 0`;
+		
+		setAttr ($result[0]+".v") 0;
+		setAttr ($result[2]+".v") 0;
+		parent $result[0] $result[2] $spineRig;
+		// Result: ikHandle1 effector1 curve1 // 		
+		
+		string $ikSpline_handle = $result[0];
+		float $spineStartJointPos[3] = `xform -q -ws -t $IKSpineJointList[size($IKSpineJointList)-1] `;
+		
+
+		float $spineEndJointPos[3] = `xform -q -ws -t $IKSpineJointList[0] `;
+		select -cl;
+		string $topJoint = `joint -p $spineEndJointPos[0] $spineEndJointPos[1] $spineEndJointPos[2]`;
+		select -cl;
+		setAttr ($topJoint+".v") 0;
+		string $botomJoint = `joint -p $spineStartJointPos[0] $spineStartJointPos[1] $spineStartJointPos[2]`;
+		parent $topJoint $botomJoint $gTemplateBody_skeleton;
+		setAttr ($botomJoint+".v") 0;
+		
+		// Set advanced twist mode
+		setAttr ($ikSpline_handle+".dTwistControlEnable") 1;
+		setAttr ($ikSpline_handle+".dWorldUpType") 4;
+		setAttr ($ikSpline_handle+".dWorldUpVectorY") 0;
+		setAttr ($ikSpline_handle+".dWorldUpVectorEndY") 0;
+		setAttr ($ikSpline_handle+".dWorldUpVectorZ") 1;
+		setAttr ($ikSpline_handle+".dWorldUpVectorEndZ") 1;
+		connectAttr -f ($topJoint+".worldMatrix[0]") ($ikSpline_handle+".dWorldUpMatrix");
+		connectAttr -f ($botomJoint+".worldMatrix[0]") ($ikSpline_handle+".dWorldUpMatrixEnd");		
+		
+		// Bind the IK Spline curve to joints
+		skinCluster  $topJoint $botomJoint $result[2];			
+		
+		// Create IK Spline stretch
+		sofa_createIKSplineStretch( $ikSpline_handle, ($spineScaleRig + ".scaleX"), 0 );
+		/*
+		// remove the Z, Y scale connection of last 2 joints in ik handle because they will cause upper body to shift while moving BUTTOM_CONTROL around
+		clear $jointList;
+		$jointList = `ikHandle -q -jl $ikSpline_handle`;
+		$result = `listConnections -d 0 -s 1 -p 1 ($jointList[size($jointList)-1]+".sz")`;
+		disconnectAttr $result[0] ($jointList[size($jointList)-1]+".sz");
+		$result = `listConnections -d 0 -s 1 -p 1 ($jointList[size($jointList)-1]+".sy")`;
+		disconnectAttr $result[0] ($jointList[size($jointList)-1]+".sy");
+		$result = `listConnections -d 0 -s 1 -p 1 ($jointList[size($jointList)-2]+".sz")`;
+		disconnectAttr $result[0] ($jointList[size($jointList)-2]+".sz");
+		$result = `listConnections -d 0 -s 1 -p 1 ($jointList[size($jointList)-2]+".sy")`;
+		disconnectAttr $result[0] ($jointList[size($jointList)-2]+".sy");	
+		*/
+				
+		
+		// Create IK Spine controls
+		$result = sofa_rig_createControl( "", 0, $IKhipJoint, 3, "", $IKHipControl, 10, $controlColor, 0, "", "", 0, 0, $gTemplateControl, 0, $controlSize, 0, 0, 0, 0, 0, 0, 0,0,0,0, "m_bodyCtl_set m_ikCtl_set m_torsoCtl_set");
+		parent $result[2] $rootControl;
+		connectAttr -f ($cogControl+".IKFK_Blend") ($result[0]+".v");
+		parentConstraint -mo -weight 1 $cogControl $result[2];	
+		parentConstraint -mo -weight 1 $IKHipControl $botomJoint;		
+		string $lastParent = $cogControl;
+		
+		int $IKSpineControlNumber = 3;
+		// remove the head and tail item and divid by control number
+		int $step = (size($IKSpineJointList)-2)/($IKSpineControlNumber+1);
+		int $index = 1;
+		for ( $j = 0,$i = (size($IKSpineJointList)-$step-1); $i > 0,$j < $IKSpineControlNumber; $j++,$i-=$step )
+		{		
+			$tmpRot = sofa_rig_getRotationFromChildJointDirection( $IKSpineJointList[$i] );	
+			$result  = sofa_rig_createControl( "", 0, $IKSpineJointList[$i], 0, "", ($IKSpineControl+$index+"_ctl_ik"), 10, $controlColor, 0, "", "", 0, 0, $gTemplateControl, 0, $controlSize, 0, 0, 0, $tmpRot[0], $tmpRot[1], $tmpRot[2], 0,0,0,0, "m_bodyCtl_set m_ikCtl_set m_torsoCtl_set");
+			parent $result[2] $rootControl;
+			parentConstraint -mo -weight 1 $lastParent $result[2];
+			$lastParent = $result[0];			
+			connectAttr -f ($cogControl+".IKFK_Blend") ($result[0]+".v");
+			sofa_rig_setLockAttributes( 1, $result[0], "tx ty tz sx sy sz" );
+			sofa_rig_setHideAttributes( 1, $result[0], "tx ty tz sx sy sz v" );
+			$index++;
+		}
+		
+		$result  = sofa_rig_createControl( "", 0, $topJoint, 0, "", $IKChestControl, 8, $controlColor, 0, "", "", 0, 0, $gTemplateControl, 0, $controlSize, 0, 0, 0, 0, 0, 0, 0,0,0,0, "m_bodyCtl_set m_ikCtl_set m_torsoCtl_set");	
+		parent $result[2] $rootControl;
+		connectAttr -f ($cogControl+".IKFK_Blend") ($result[0]+".v");
+		parentConstraint -mo -weight 1 $lastParent $result[2];
+		sofa_rig_setLockAttributes( 1, $result[0], "sx sy sz v" );
+		sofa_rig_setHideAttributes( 1, $result[0], "sx sy sz v" );		
+		
+		string $chestCtlCon = `group -n "chest_ctl_con" $topJoint`;
+		setAttr ($chestCtlCon+".v") 0;		
+		parentConstraint -mo -weight 1 $IKChestControl $chestCtlCon;		
+		
+		
+		/* create IK handle for neck&head*/		
+		// by geting long name we can retrive all its parents
+		$tmp = `ls -l $neckEndJoint`;
+		$jointLongName = $tmp[0];	
+
+		clear $jointList;
+		$jointList = stringToStringArray($jointLongName, "|");
+		//clear $IKSpineJointList;
+		string $IKNeckJointList[];
+		$index = 0;
+		
+		$childJoint = "";
+		//  duplicate new joint chain for IK spline
+		for ( $i = size($jointList)-1; $i >= 0; $i-- )
+		{				
+			// duplicate joint without childs
+			$tmp = `duplicate -n ("IK"+$jointList[$i]) -po $jointList[$i]`;			
+			
+			// parent last duplicated joint to current
+			if ( `objExists $childJoint`)
+				parent $childJoint $tmp[0];			
+			$childJoint = $tmp[0];		
+			
+			// store to another array
+			$IKNeckJointList[$index] = $tmp[0];	
+			$index++;	
+			
+			// skip all joints or objs after spineEndJoint 
+			if ( $jointList[$i] == $neckStartJoint )
+				break;	
+		}
+		// parent new duplicated joint chain to rig grp
+		parent $IKNeckJointList[size($IKNeckJointList)-1] $gTemplateBody_skeleton;
+		
+		$tmp = `duplicate -po $IKNeckJointList[0]`;
+		// The extra joint must be in one straight line
+		rename $tmp[0] "neckIKSplineEnd";
+		$tmp[0] = "neckIKSplineEnd";
+		$dis = `getAttr ($tmp[0]+".tx")`;
+		setAttr ($tmp[0]+".t") ($dis *1.1) 0 0;
+		parent $tmp[0] $IKNeckJointList[0];
+		
+		// Create IK Spline handle and bind skin to extra joints
+		clear $result;		
+		$result = `ikHandle -sol ikSplineSolver -n ("neck_IKSplineHandle") -startJoint $IKNeckJointList[size($IKNeckJointList)-2] -endEffector $tmp[0] -parentCurve 0`;
+		
+		setAttr ($result[0]+".v") 0;
+		setAttr ($result[2]+".v") 0;
+		parent $result[0] $result[2] $spineRig;
+		
+		$ikSpline_handle = $result[0];
+		
+		float $neckStartJointPos[3] = `xform -q -ws -t $IKNeckJointList[size($IKNeckJointList)-1]`;
+		float $neckEndJointPos[3] = `xform -q -ws -t $tmp[0] `;
+		select -cl;		
+		
+		$topJoint = `joint -p $neckEndJointPos[0] $neckEndJointPos[1] $neckEndJointPos[2]`;
+		select -cl;
+		setAttr ($topJoint+".v") 0;		
+		string $midJoint = `joint -p (($neckEndJointPos[0]+$neckStartJointPos[0])/2) (($neckEndJointPos[1]+$neckStartJointPos[1])/2) (($neckEndJointPos[2]+$neckStartJointPos[2])/2)`;
+		setAttr ($midJoint+".v") 0;		
+		$botomJoint = `joint -p $neckStartJointPos[0] $neckStartJointPos[1] $neckStartJointPos[2]`;		
+		setAttr ($botomJoint+".v") 0;
+		
+		string $IKheadJoint = `joint -p $neckEndJointPos[0] $neckEndJointPos[1] $neckEndJointPos[2]`;	
+		rename $IKheadJoint ("IKHead2");
+		$IKheadJoint = ("IKHead2");
+		setAttr ($IKheadJoint+".v") 0;
+		
+		string $headCtlCon = `group -n ("head_ctl_con") $topJoint $IKheadJoint`;	
+		setAttr ($headCtlCon+".v") 0;		
+		parent $headCtlCon $midJoint $botomJoint $gTemplateBody_skeleton;
+		
+		// Set advanced twist mode
+		setAttr ($ikSpline_handle+".dTwistControlEnable") 1;
+		setAttr ($ikSpline_handle+".dWorldUpType") 4;
+		setAttr ($ikSpline_handle+".dWorldUpVectorY") 0;
+		setAttr ($ikSpline_handle+".dWorldUpVectorEndY") 0;
+		setAttr ($ikSpline_handle+".dWorldUpVectorZ") 1;
+		setAttr ($ikSpline_handle+".dWorldUpVectorEndZ") 1;
+		connectAttr -f ($topJoint+".worldMatrix[0]") ($ikSpline_handle+".dWorldUpMatrix");
+		connectAttr -f ($botomJoint+".worldMatrix[0]") ($ikSpline_handle+".dWorldUpMatrixEnd");		
+		
+		// Bind the IK Spline curve to joints
+		skinCluster  $topJoint $midJoint $botomJoint $result[2];	
+		
+		// Create IK Spline stretch
+		sofa_createIKSplineStretch( $ikSpline_handle, ($spineScaleRig + ".scaleX"), 0 );
+		// remove the scale control of last 2 joints in ik handle because they will cause problem
+		/*
+		$jointList = `ikHandle -q -jl $ikSpline_handle`;
+		$result = `listConnections -d 0 -s 1 -p 1 ($jointList[size($jointList)-1]+".sz")`;
+		disconnectAttr $result[0] ($jointList[size($jointList)-1]+".sz");
+		$result = `listConnections -d 0 -s 1 -p 1 ($jointList[size($jointList)-1]+".sy")`;
+		disconnectAttr $result[0] ($jointList[size($jointList)-1]+".sy");		
+
+		$result = `listConnections -d 0 -s 1 -p 1 ($jointList[size($jointList)-2]+".sz")`;
+		string $array[] = stringToStringArray($result[0], ".");
+		if (`attributeExists $array[1] $array[0]`) 
+			disconnectAttr $result[0] ($jointList[size($jointList)-2]+".sz");
+			
+		$result = `listConnections -d 0 -s 1 -p 1 ($jointList[size($jointList)-2]+".sy")`;		
+		clear $array;
+		$array = stringToStringArray($result[0], ".");
+		if (`attributeExists $array[1] $array[0]`) 
+			disconnectAttr $result[0] ($jointList[size($jointList)-2]+".sy");
+		*/
+		
+		parent $IKNeckJointList[size($IKNeckJointList)-1] $botomJoint $chestCtlCon;
+		pointConstraint -offset 0 0 0 -weight 1 $topJoint $botomJoint $midJoint;
+		
+		$tmpRot = sofa_rig_getRotationFromChildJointDirection( $neckJoint );
+		$result  = sofa_rig_createControl( "", 0, $botomJoint, 0, "", $IKNeckControl, 10, $controlColor, 0, "", "", 0, 0, $gTemplateControl, 0, $controlSize, 0, 0, 0, $tmpRot[0], $tmpRot[1], $tmpRot[2], 0,0,0,0, "m_bodyCtl_set m_ikCtl_set m_torsoCtl_set");
+		$IKNeckControl = $result[0];
+		parent $result[2] $rootControl;
+		connectAttr -f ($cogControl+".IKFK_Blend") ($IKNeckControl+".v");
+		parentConstraint -mo -weight 1 $IKChestControl $result[2];
+		sofa_rig_setLockAttributes( 1, $IKNeckControl, "tx ty tz sx sy sz v" );
+		sofa_rig_setHideAttributes( 1, $IKNeckControl, "tx ty tz sx sy sz v" );
+		
+		$tmpRot = sofa_rig_getRotationFromChildJointDirection( $headJoint );
+		$result  = sofa_rig_createControl( "", 0, $topJoint, 0, "", $IKHeadControl, 10, $controlColor, 0, $rootControl, $spineScaleRig, 0, 0, $gTemplateControl, 0, $controlSize, 0, 0, 0, $tmpRot[0], $tmpRot[1], $tmpRot[2], 0,0,0,0, "m_bodyCtl_set m_ikCtl_set m_torsoCtl_set");
+		$IKHeadControl = $result[0];
+		parent $result[2] $rootControl;
+		connectAttr -f ($cogControl+".IKFK_Blend") ($IKHeadControl+".v");
+		parentConstraint -mo -weight 1 $IKNeckControl $result[2];		
+		sofa_rig_setLockAttributes( 1, $IKHeadControl, "sx sy sz v" );
+		sofa_rig_setHideAttributes( 1, $IKHeadControl, "sx sy sz v" );		
+		parentConstraint -mo -weight 1 $IKHeadControl $headCtlCon;
+		
+		
+		/* In order to create  IKFK switch, we ned to concate all of the IK joints*/		
+		$IKJointList[0] = $IKheadJoint;	
+		
+		// find and duplicate joints betwen chest and neck
+		clear $tmp;
+		$tmp = `ls -l $neckStartJoint`;
+		$jointLongName = $tmp[0];
+		string $IKChestSectionJointList[];
+		clear $jointList;
+		$jointList = stringToStringArray($jointLongName, "|");
+		$index = 0;
+		$childJoint = "";
+		for ( $i = size($jointList)-2; $i >= 0; $i-- )
+		{
+			if ( $jointList[$i] == $spineEndJoint )
+				break;
+			
+			// duplicate joint without childs
+			$tmp = `duplicate -po -n ("IK"+$jointList[$i]) $jointList[$i]`;
+			// parent last duplicated joint to current
+			if ( `objExists $childJoint`)
+				parent $childJoint $tmp[0];
+			$childJoint = $tmp[0];
+			
+			$IKChestSectionJointList[$index] = $tmp[0];			
+			$index++;
+		}
+		if($index > 0)
+			parent $childJoint $botomJoint;
+
+		stringArrayRemoveAtIndex(0, $IKNeckJointList);
+		$IKJointList = stringArrayCatenate($IKJointList,$IKNeckJointList);
+		$IKJointList = stringArrayCatenate($IKJointList,$IKChestSectionJointList);	
+		stringArrayRemoveAtIndex(0, $IKSpineJointList);
+		stringArrayRemoveAtIndex(0, $IKSpineJointList);
+		stringArrayRemoveAtIndex(size($IKSpineJointList)-1, $IKSpineJointList);	
+		stringArrayInsertAtIndex(0, $IKSpineJointList, $botomJoint);		
+		$IKJointList = stringArrayCatenate($IKJointList,$IKSpineJointList);
+		
+		// find and duplicate joints betwen IKSpine start and root
+		clear $tmp;
+		$tmp = `ls -l $spineStartJoint`;
+		$jointLongName = $tmp[0];
+		string $IKJointListBetweenRootSpineStart[];
+		clear $jointList;
+		$jointList = stringToStringArray($jointLongName, "|");
+		$index = 0;
+		$childJoint = "";	
+		for ( $i = size($jointList)-2; $i >= 0; $i-- )
+		{
+			if ( $jointList[$i] == $hipJoint )
+				break;
+			
+			// duplicate joint without childs
+			$tmp = `duplicate -po -n ("IK"+$jointList[$i]) $jointList[$i]`;
+			// parent last duplicated joint to current
+			if ( `objExists $childJoint`)
+				parent $childJoint $tmp[0];
+			$childJoint = $tmp[0];
+			
+			$IKJointListBetweenRootSpineStart[$index] = $tmp[0];			
+			$index++;
+		}
+		if($index > 0)
+			parent $childJoint $IKhipJoint;
+			
+		$IKJointList = stringArrayCatenate($IKJointList,$IKJointListBetweenRootSpineStart);		
+	
+		$IKJointList[size($IKJointList)] = $IKhipJoint;
+	}
+	
+	//  record rig spine joint list
+	string $tmp[] = `ls -l $headEndJoint`;
+	string $jointLongName = $tmp[0];
+	string $jointList[] = stringToStringArray($jointLongName, "|");
+	int $index = 0;
+	string $RigJointList[];	
+	for ( $i = size($jointList)-1; $i >= 0; $i-- )
+	{
+		if ( $i != size($jointList)-1 )
+		{
+			$RigJointList[$index] = $jointList[$i];
+			$index++;
+		}
+		
+		// skip all joints or objs after hipJoint 
+		if ( $jointList[$i] == $hipJoint )
+			break;
+	}	
+
+	// The length of IK joint chain is shorter than the Rig joint chain ( because for IK we dont create extra section joint for head
+	// Therefor, we have to push empty item into Ik joint chain array to make sure that the length of the Rig and IK joints are the same
+	int $diff = size($RigJointList) - size($IKJointList);
+	for ( $i = 0; $i < $diff; $i++ )	
+	  stringArrayInsertAtIndex($i, $IKJointList, "");
+
+	// Here are 3 different satuatnion to create the relation between rig joints and envelop joints
+	if ( $isIKSpine && $isFKSpine ) 
+	{
+		for ( $i = size($RigJointList)-1; $i >= 0; $i-- )
+		{
+			if ( `objExists $IKJointList[$i]` && `objExists $FKJointList[$i]` && `objExists $RigJointList[$i]` )
+			{
+				string $parentCon[1] = `parentConstraint -mo -weight 1 $IKJointList[$i] $FKJointList[$i] $RigJointList[$i]`;
+				connectAttr -f ($cogControl+".IKFK_Blend") ($parentCon[0]+"."+$IKJointList[$i]+"W0");
+				connectAttr -f ($IKFK_Blend_Reverse+".outputX") ($parentCon[0]+"."+$FKJointList[$i]+"W1");				
+				string $blend = `shadingNode -n ($RigJointList[$i]+"_IKFK_scale_blend") -asUtility blendColors`;			
+				connectAttr -f ($IKJointList[$i]+".scale") ($blend+".color1");
+				connectAttr -f ($FKJointList[$i]+".scale") ($blend+".color2");			
+				connectAttr -f ($cogControl+".IKFK_Blend") ($blend+".blender");
+				connectAttr -f ($blend+".output") ($RigJointList[$i]+".scale");				
+			}
+		}
+	}
+	if ( $isIKSpine && !$isFKSpine )
+	{
+		for ( $i = size($RigJointList)-1; $i >= 0; $i-- )
+		{
+			if ( `objExists $IKJointList[$i]` && `objExists $RigJointList[$i]` )
+			{
+				parentConstraint -mo -weight 1 $IKJointList[$i] $RigJointList[$i];
+				scaleConstraint -offset 1 1 1 -weight 1 $IKJointList[$i] $RigJointList[$i];			
+			}
+		}
+	}
+	if ( !$isIKSpine && $isFKSpine )
+	{
+		for ( $i = size($RigJointList)-1; $i >= 0; $i-- )
+		{
+			if ( `objExists $FKJointList[$i]` && `objExists $RigJointList[$i]` )
+			{
+				parentConstraint -mo -weight 1 $FKJointList[$i] $RigJointList[$i];
+				scaleConstraint -offset 1 1 1 -weight 1 $FKJointList[$i] $RigJointList[$i];
+				setAttr ($cogControl+".IKFK_Blend") 0;
+			}
+		}
+	}
+	select -cl;
+}
+
+global proc sofa_rig_createLegRig( int $isIKLeg, int $isFKLeg, int $side, float $controlSize, int $controlColor, string $rootControl, string $lowerHipJoint, string $upperLegJoint, string $upperLeg2Joint, string $lowerLegJoint, string $lowerLeg2Joint, string $ankleJoint, string $ballJoint, string $toeJoint, int $isFlipPoleVector )
+{
+	select -cl;
+	sofa_rig_templateExistanceCheck;
+	
+	global string $gTemplateAll, $gTemplateTransformA, $gTemplateTransformB, $gTemplateTransformC, $gTemplateDeformer, $gTemplateRig, $gTemplateGeometry, 
+	$gTemplateControl, $gTemplateSkeleton, $gTemplateBody_rig, $gTemplateFacial_rig, $gTemplateBody_control, $gTemplateFacial_control, $gTemplateBody_skeleton, 
+	$gTemplateFacial_skeleton;
+	global int $useNewNamingRule;
+
+	
+	$controlColor--;
+	
+	$rootControl = sofa_rig_getRealRootControl($rootControl);
+	
+	string $prefix = sofa_rig_getPrefixName($side);
+	//rename
+	string $FKHipControl, $FKUpperLegControl, $FKLowerLegControl, $FKAnkleControl, $FKBallControl, $IKPoleVectorControl, $IKFootControl;	
+	if(!$useNewNamingRule)
+	{
+		$FKHipControl = ($prefix+ "Hip_Rot");
+		$FKUpperLegControl = ($prefix+ "FK_FEMUR_CONTROL");
+		$FKLowerLegControl = ($prefix+ "FK_KNEE_CONTROL");
+		$FKAnkleControl = ($prefix+ "FK_ANKLE_CONTROL");	
+		$FKBallControl = ($prefix+ "FK_BALL_CONTROL");	
+		$IKPoleVectorControl = ($prefix+ "IKLeg_Pole");
+		$IKFootControl = ($prefix+ "IKFootControl");
+	}
+	else
+	{
+		$FKHipControl = ($prefix+ "hip_ctl_fk");
+		$FKUpperLegControl = ($prefix+ "leg_ctl_fk");
+		$FKLowerLegControl = ($prefix+ "knee_ctl_fk");
+		$FKAnkleControl = ($prefix+ "ankle_ctl_fk");	
+		$FKBallControl = ($prefix+ "toe_ctl_fk");	
+		$IKPoleVectorControl = ($prefix+ "knee_ctl_ik");
+		$IKFootControl = ($prefix+ "foot_ctl_ik");
+	}
+	
+	string $legRig = `group -em -n ($prefix+ "leg_rig")`;
+	string $legScaleRig = `group -em -n ($prefix+ "leg_scale_rig")`;
+	parent $legScaleRig $legRig;
+	parent $legRig $gTemplateBody_rig;
+	scaleConstraint -offset 1 1 1 -weight 1 $rootControl $legScaleRig;
+	
+	string $buf[1] = `listRelatives -p $lowerHipJoint`;	
+	string $parentJointOfHip = $buf[0];
+	
+	if ($isFKLeg)
+	{	
+		// create hip FK control
+		float $dis = sofa_rig_getDistance( $parentJointOfHip, $lowerHipJoint )*2;
+		sofa_rig_createControl( $parentJointOfHip, 1, $lowerHipJoint, 1, $upperLegJoint, $FKHipControl, 4, $controlColor, 0, $rootControl, $legScaleRig, 0, 0, $rootControl, $side, $controlSize, $dis, 0, 0, 0,0,0,90, 0, -90, 1, ("m_bodyCtl_set "+tolower($prefix)+"legCtl_set") );
+		//add IKFK blend attr
+		addAttr -ln "IKFK_Blend" -at double -dv 1 -min 0 -max 1 $FKHipControl;
+		setAttr -e -keyable true ($FKHipControl+".IKFK_Blend");			
+		
+		// create upper leg FK control
+		$buf = `listRelatives -p $upperLegJoint`;
+		if (`objExists $upperLeg2Joint`)
+		{	
+			sofa_rig_createControl( $buf[0], 1, $upperLegJoint, 1, $upperLeg2Joint, $FKUpperLegControl, 1, $controlColor, 1, $rootControl, $legScaleRig,1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0, 0, 0,0,0,0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"legCtl_set") );
+			$buf = `listRelatives -p $upperLeg2Joint`;
+			sofa_rig_createControl( $buf[0], 1, $upperLeg2Joint, 1, $lowerLegJoint, ($FKUpperLegControl+"2"), 1, $controlColor, 0, $rootControl, $legScaleRig,1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0, 0, 0,0,0,0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"legCtl_set") );
+		}
+		else
+			sofa_rig_createControl( $buf[0], 1, $upperLegJoint, 1, $lowerLegJoint, $FKUpperLegControl, 1, $controlColor, 1, $rootControl, $legScaleRig,1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0, 0, 0,0,0,0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"legCtl_set") );
+		
+		// create lower leg FK control
+		$buf = `listRelatives -p $lowerLegJoint`;
+		if (`objExists $lowerLeg2Joint`)
+		{	
+			sofa_rig_createControl( $buf[0], 1, $lowerLegJoint, 1, $lowerLeg2Joint, $FKLowerLegControl, 1, $controlColor, 1, $rootControl, $legScaleRig,1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0, 0, 0,0,0,0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"legCtl_set") );
+			$buf = `listRelatives -p $lowerLeg2Joint`;
+			sofa_rig_createControl( $buf[0], 1, $lowerLeg2Joint, 1, $ankleJoint, ($FKLowerLegControl+"2"), 1, $controlColor, 1, $rootControl, $legScaleRig,1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0, 0, 0,0,0,0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"legCtl_set") );
+		}
+		else
+			sofa_rig_createControl( $buf[0], 1, $lowerLegJoint, 1, $ankleJoint, $FKLowerLegControl, 1, $controlColor, 1, $rootControl, $legScaleRig,1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0, 0, 0,0,0,0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"legCtl_set") );
+		// Set limitation of rotation in order to caculate IKFK switch correctly
+		sofa_rig_setLockAttributes( 1, $FKLowerLegControl, "rx ry" );
+		sofa_rig_setHideAttributes( 1, $FKLowerLegControl, "rx ry" );		
+		
+		// create ankle FK control
+		$buf = `listRelatives -p $ankleJoint`;		
+		sofa_rig_createControl( $buf[0], 1, $ankleJoint, 1, $ballJoint, $FKAnkleControl, 5, $controlColor, 1, $rootControl, $legScaleRig,0, 0, $rootControl, $side, $controlSize, 0, 0, 0, 0,0,0,90, 0, -90, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"legCtl_set") );
+		
+		// create ball FK control
+		$buf = `listRelatives -p $ballJoint`;
+		sofa_rig_createControl( $buf[0], 1, $ballJoint, 1, "", $FKBallControl, 6, $controlColor, 0, $rootControl, $legScaleRig, 0, 0, $rootControl, $side, $controlSize, 0, 0, 0, 0,0,0,90, 0, -90, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"legCtl_set") );
+	}	
+	
+	int $ankleRotateOrder = `getAttr ($ankleJoint+".rotateOrder")`;	
+	if ($isIKLeg)
+	{		
+		// create ankle IK control
+		string $tmp[] = sofa_rig_createControl( "", 0, $ankleJoint, 1, "", $IKFootControl, 7, $controlColor, 0, $rootControl, $legScaleRig, 0, 0, $rootControl, $side, $controlSize, 0, -0.3, 1, 0, 0,0,0,0, 0, 0, ("m_bodyCtl_set m_ikCtl_set "+tolower($prefix)+"legCtl_set") );// no free orient
+		sofa_rig_setLockAttributes( 0, $IKFootControl, "tx ty tz" );
+		sofa_rig_setHideAttributes( 0, $IKFootControl, "tx ty tz" );
+		setAttr -k 1 ($IKFootControl+".tx");
+		setAttr -k 1 ($IKFootControl+".ty");
+		setAttr -k 1 ($IKFootControl+".tz");
+		
+		// create ankle IK follow hip control		
+		string $IKFootControl_follow_hip = `group -em -n ($IKFootControl+"_follow_hip")`;
+		sofa_rig_alignAndAttach( $IKFootControl_follow_hip, $parentJointOfHip, 0, 1 );			
+		string $result[] = `parentConstraint -mo -weight 1 $parentJointOfHip $IKFootControl_follow_hip $tmp[2]`;			
+		addAttr -ln ("followHip") -at double -dv 0 -min 0 -max 1 $IKFootControl;
+		setAttr -e -keyable true ($IKFootControl+".followHip");			
+		connectAttr -f ($IKFootControl+".followHip") ($result[0]+"."+$parentJointOfHip+"W0");
+		string $reverseNode = `shadingNode -asUtility reverse`;
+		connectAttr -f ($IKFootControl+".followHip") ($reverseNode+".inputX");			
+		connectAttr -f ($reverseNode+".outputX") ($result[0]+"."+$IKFootControl_follow_hip+"W1");
+		parent $IKFootControl_follow_hip $legScaleRig;
+		parentConstraint -mo -weight 1 $rootControl $IKFootControl_follow_hip;
+		
+		/* create IK handle for ankle, ball and toe joints, also create groups which has different pivot to control feet's roll*/
+		float $anklePos[3] = `xform -q -ws -t $ankleJoint`;
+		float $ballPos[3] = `xform -q -ws -t $ballJoint`;
+		float $toePos[3] = `xform -q -ws -t $toeJoint`;
+		
+		$result = `ikHandle -solver ikRPsolver -startJoint $upperLegJoint -endEffector $ankleJoint -n ($IKFootControl+"_handle")`;
+		string $LegIKHandle = $result[0];
+		connectAttr -f ($FKHipControl+".IKFK_Blend") ($LegIKHandle+".ikBlend");		
+		setAttr ($LegIKHandle + ".v") 0;	
+		setAttr ($LegIKHandle + ".stickiness") 1;
+		
+		$result = `ikHandle -solver ikSCsolver -startJoint $ankleJoint -endEffector $ballJoint -n ($IKFootControl+"_ball_handle")`;
+		string $ballIK = $result[0];		
+		connectAttr -f ($FKHipControl+".IKFK_Blend") ($ballIK+".ikBlend");		
+		string $rollBallPivot = `group -em -n ($IKFootControl+"_roll_Ball_Pivot")`;		
+		move -a $ballPos[0] $ballPos[1] $ballPos[2] ($rollBallPivot+".scalePivot"); 
+		move -a $ballPos[0] $ballPos[1] $ballPos[2] ($rollBallPivot+".rotatePivot");
+		parent $LegIKHandle $ballIK $rollBallPivot;		
+
+		select -cl;
+		$result = `ikHandle -solver ikSCsolver -startJoint $ballJoint -endEffector $toeJoint -n ($IKFootControl+"_toe_handle")`;
+		string $toeIK = $result[0];
+		connectAttr -f ($FKHipControl+".IKFK_Blend") ($toeIK+".ikBlend");		
+		string $toeBend = `group -em -n ($IKFootControl+"_toe_bend")`;		
+		move -a $ballPos[0] $ballPos[1] $ballPos[2] ($toeBend+".scalePivot"); 
+		move -a $ballPos[0] $ballPos[1] $ballPos[2] ($toeBend+".rotatePivot");
+		parent $toeIK $toeBend;
+		
+		string $ballTwistBank = `group -em -n ($IKFootControl+"_ball_Twist_bank")`;		
+		move -a $ballPos[0] $ballPos[1] $ballPos[2] ($ballTwistBank+".scalePivot"); 
+		move -a $ballPos[0] $ballPos[1] $ballPos[2] ($ballTwistBank+".rotatePivot");
+		parent $rollBallPivot $toeBend $ballTwistBank;
+		
+		string $toeTwist_rollToePivot = `group -em -n ($IKFootControl+"_toe_twist_roll_toe_pivot")`;
+		move -a $toePos[0] $toePos[1] $toePos[2] ($toeTwist_rollToePivot+".scalePivot"); 
+		move -a $toePos[0] $toePos[1] $toePos[2] ($toeTwist_rollToePivot+".rotatePivot");
+		parent $ballTwistBank $toeTwist_rollToePivot;
+		
+		string $rollHeelPivot = `group -em -n ($IKFootControl+"_roll_heel_pivot")`;		
+		move -a $anklePos[0] 0 $anklePos[2] ($rollHeelPivot+".scalePivot"); 
+		move -a $anklePos[0] 0 $anklePos[2] ($rollHeelPivot+".rotatePivot");
+		parent $toeTwist_rollToePivot $rollHeelPivot;
+		
+		string $legIK = `group -em -n ($IKFootControl+"_leg_IK")`;		
+		move -a $anklePos[0] $anklePos[1] $anklePos[2] ($legIK+".scalePivot"); 
+		move -a $anklePos[0] $anklePos[1] $anklePos[2] ($legIK+".rotatePivot");
+		parent $rollHeelPivot $legIK;
+		parentConstraint -mo -weight 1 $IKFootControl $legIK;
+		setAttr ($legIK+".v") 0;
+		parent $legIK $legScaleRig;
+		
+		addAttr -ln "Bank" -at double -dv 0 -keyable 1 $IKFootControl;		
+		addAttr -ln "Roll" -at double -dv 0 -min -10 -max 10  -keyable 1 $IKFootControl;		
+		addAttr -ln "ToeBend" -at double -dv 0  -keyable 1 $IKFootControl;		
+		addAttr -ln "BallTwist" -at double -dv 0  -keyable 1 $IKFootControl;
+		addAttr -ln "ToeTwist" -at double -dv 0  -keyable 1 $IKFootControl;		
+
+		connectAttr ($IKFootControl + ".Bank") ($ballTwistBank + ".rz");
+		connectAttr ($IKFootControl + ".ToeBend") ($toeBend + ".rx");
+		connectAttr ($IKFootControl + ".BallTwist") ($ballTwistBank + ".ry");
+		connectAttr ($IKFootControl + ".ToeTwist") ($toeTwist_rollToePivot + ".ry");
+		
+		setAttr ($IKFootControl + ".Roll") 0;
+		setDrivenKeyframe -itt linear -ott linear -cd ($IKFootControl + ".Roll") ($rollHeelPivot + ".rx");
+		setDrivenKeyframe -itt linear -ott linear -cd ($IKFootControl + ".Roll") ($rollBallPivot + ".rx");
+		setAttr ($IKFootControl + ".Roll") -10;
+		setAttr ($rollHeelPivot + ".rx") -90;
+		setDrivenKeyframe -itt linear -ott linear -cd ($IKFootControl + ".Roll") ($rollHeelPivot + ".rx");
+		setAttr ($IKFootControl + ".Roll") 5;
+		setAttr ($rollBallPivot + ".rx") 40;
+		setDrivenKeyframe -itt linear -ott flat -cd ($IKFootControl + ".Roll") ($rollBallPivot + ".rx");
+		setDrivenKeyframe -itt linear -ott linear -cd ($IKFootControl + ".Roll") ($toeTwist_rollToePivot + ".rx");
+		setAttr ($IKFootControl + ".Roll") 10;
+		setAttr ($toeTwist_rollToePivot + ".rx") 80;
+		setAttr ($rollBallPivot + ".rx") 0;
+		setDrivenKeyframe -itt linear -ott linear -cd ($IKFootControl + ".Roll") ($rollBallPivot + ".rx");
+		setDrivenKeyframe -itt linear -ott linear -cd ($IKFootControl + ".Roll") ($toeTwist_rollToePivot + ".rx");
+		setAttr ($IKFootControl + ".Roll") 0;
+		
+
+		// If ankle joint has been connected by FK, Maya will create pairblend automatically if you add Ik constrain
+		// We dont expect that so in here we delete pairblend and parentConstrain nodes and redo the parentConstrains for FK and IK
+		if ($isFKLeg) 
+		{
+			/*find all pairblend and parentConstrain nodes*/
+			string $pairBlend[1] = `listConnections -s 1 -d 0 ($ankleJoint+".rx")`;
+			
+			$tmp = `listConnections -s 1 -d 0 ($pairBlend[0]+".inRotateX1")`;	
+			string $controlJoint1[1] = `listConnections -s 1 -d 0 ($tmp[0]+".target[0].targetRotate")`;
+			string $cmd = ("delete "+$tmp[0]+";");
+			
+			$tmp = `listConnections -s 1 -d 0 ($pairBlend[0]+".inRotateX2")`;	
+			string $controlJoint2[1] = `listConnections -s 1 -d 0 ($tmp[0]+".target[0].targetRotate")`;
+			$cmd += ("delete "+$tmp[0]+";");
+			eval $cmd;			
+
+			/*connect parentConstraint weight with IKFK blender*/
+			string $parentConstrain[] = `parentConstraint -mo -skipTranslate x -skipTranslate y -skipTranslate z -weight 1 $controlJoint1[0] $controlJoint2[0] $ankleJoint`;	
+			connectAttr -f ($FKHipControl+".IKFK_Blend") ($parentConstrain[0]+"."+$controlJoint2[0]+"W1");
+			string $ankleControlReverse = `shadingNode -n ($IKFootControl+"_reverse") -asUtility reverse`;			
+			connectAttr -f ($FKHipControl+".IKFK_Blend") ($ankleControlReverse+".inputX");
+			connectAttr -f ($ankleControlReverse+".outputX") ($parentConstrain[0]+"."+$controlJoint1[0]+"W0");
+			/*Sometimes ues two different orientation of controls to parentConstrain one joint will having problem when the blend value is 0.5. */
+			/*In that case, set the Inter type to no flip can fix it*/
+			setAttr ($parentConstrain[0]+".interpType") 0;
+		}
+		
+		// create pole vector for ik handle
+		float $poleVectorValue[3] = `getAttr ($LegIKHandle+".poleVector")`;
+		float $upperLegPos[3] = `xform -q -ws -t $upperLegJoint`;		
+		$tmp = `spaceLocator -p 0 0 0 -n ($IKFootControl + "_Pole_Locator")`;
+		string $poleIKLegLocator = $tmp[0];
+		string $poleIKLegLocator_offset = `group -em -n ($poleIKLegLocator + "_offset")`;
+		parent $poleIKLegLocator $poleIKLegLocator_offset;
+		setAttr ($poleIKLegLocator_offset+".translate") $upperLegPos[0] $upperLegPos[1] $upperLegPos[2] ;
+		setAttr ($poleIKLegLocator+".translate") $poleVectorValue[0] $poleVectorValue[1] $poleVectorValue[2] ;
+		poleVectorConstraint $poleIKLegLocator $LegIKHandle;
+		setAttr ($poleIKLegLocator_offset+".v") 0;
+				
+		string $poleIKLeg_orient = `group -em -n ($IKPoleVectorControl + "_orient")`;
+		string $result[] = sofa_rig_createControl( "", 0, "", 0, "", $IKPoleVectorControl, 3, $controlColor, 0, "", "", 0, 0, $gTemplateControl, 0, ($controlSize/2), 0, 0, 0, 0,0,0,0, 0, 0, 0, ("m_bodyCtl_set m_ikCtl_set "+tolower($prefix)+"legCtl_set") );
+		$IKPoleVectorControl = $result[0];
+		parent $IKPoleVectorControl $poleIKLeg_orient;
+		delete $result[2];			
+		
+		// Create pole vector follow foot control				
+		string $IKPoleVectorControl_follow_foot = `group -em -n ($IKPoleVectorControl+"_follow_foot")`;
+		sofa_rig_alignAndAttach( $IKPoleVectorControl_follow_foot, $IKFootControl, 1, 1 );	
+		$result = `parentConstraint -mo -skipTranslate x -skipTranslate y -skipTranslate z -skipRotate x -skipRotate z -weight 1 $IKFootControl $IKPoleVectorControl_follow_foot $poleIKLeg_orient`;
+		addAttr -ln "followPoleVector" -at double -dv 1 -min 0 -max 1  -keyable 1 $IKPoleVectorControl;					
+		connectAttr -f ($IKPoleVectorControl+".followPoleVector") ($result[0]+"."+$IKFootControl+"W0");
+		string $reverseNode1 = `shadingNode -asUtility reverse`;
+		connectAttr -f ($IKPoleVectorControl+".followPoleVector") ($reverseNode1+".inputX");			
+		connectAttr -f ($reverseNode1+".outputX") ($result[0]+"."+$IKPoleVectorControl_follow_foot+"W1");
+		parentConstraint -mo -weight 1 $rootControl $IKPoleVectorControl_follow_foot;		
+		parent $IKPoleVectorControl_follow_foot $legScaleRig;			
+		
+		// In order to keep both side rotate in opposite direction, we must adjust the oritation of right side
+		if ( $side == 2 )
+			setAttr ($poleIKLeg_orient+".rotate") 180 0 0;
+		
+		string $poleIKLeg_offset = `group -em -n ($IKPoleVectorControl + "_offset")`;		
+		parent $poleIKLeg_orient $poleIKLeg_offset;			
+		setAttr ($poleIKLeg_offset+".translate") $upperLegPos[0] $upperLegPos[1] $upperLegPos[2] ;	
+		
+		// Here we take the length from upper leg to ankle as the distance of pole vector
+		float $poleVectorDistance = sofa_rig_getDistance($ankleJoint, $upperLegJoint);
+		
+		// Find out which axis is the the prefer angle of IK handle
+		float $poleVectorOffset[3];
+		if ( abs($poleVectorValue[0]) > abs($poleVectorValue[1]) && abs($poleVectorValue[0]) > abs($poleVectorValue[2]) )
+		{
+			int $factor = 1;
+			if ( $poleVectorValue[0] < 0 )
+				$factor = -1;
+			$poleVectorOffset[0] = $poleVectorDistance * $factor;		
+		}
+		if ( abs($poleVectorValue[1]) > abs($poleVectorValue[0]) && abs($poleVectorValue[1]) > abs($poleVectorValue[2]) )
+		{
+			int $factor = 1;
+			if ( $poleVectorValue[1] < 0 )
+				$factor = -1;
+			$poleVectorOffset[1] = $poleVectorDistance * $factor;		
+		}
+		if ( abs($poleVectorValue[2]) > abs($poleVectorValue[0]) && abs($poleVectorValue[2]) > abs($poleVectorValue[1]) )
+		{
+			int $factor = 1;
+			if ( $poleVectorValue[2] < 0 )
+				$factor = -1;
+			$poleVectorOffset[2] = $poleVectorDistance * $factor;		
+		}	
+		int $flip = 1;
+		if ($isFlipPoleVector)
+			$flip = -1;
+		xform -ws -r -t ($poleVectorOffset[0]*$flip) ($poleVectorOffset[1]*$flip) ($poleVectorOffset[2]*$flip) $poleIKLeg_offset; 
+		float $ploeVectorPos[3] = `xform -q -ws -t $poleIKLeg_offset`;
+		
+		xform -ws -t $upperLegPos[0] $upperLegPos[1] $upperLegPos[2] ($IKPoleVectorControl+".scalePivot"); 
+		xform -ws -t $upperLegPos[0] $upperLegPos[1] $upperLegPos[2] ($IKPoleVectorControl+".rotatePivot"); 
+		xform -ws -t $upperLegPos[0] $upperLegPos[1] $upperLegPos[2] ($poleIKLeg_orient+".scalePivot"); 
+		xform -ws -t $upperLegPos[0] $upperLegPos[1] $upperLegPos[2] ($poleIKLeg_orient+".rotatePivot"); 
+		xform -ws -t $upperLegPos[0] $upperLegPos[1] $upperLegPos[2] ($poleIKLeg_offset+".scalePivot"); 
+		xform -ws -t $upperLegPos[0] $upperLegPos[1] $upperLegPos[2] ($poleIKLeg_offset+".rotatePivot"); 
+		
+		parentConstraint -mo -weight 1 $IKPoleVectorControl $poleIKLegLocator_offset;		
+		pointConstraint -offset 0 0 0 -weight 1 $upperLegJoint $poleIKLeg_orient;
+		parentConstraint -mo -weight 1 $rootControl $poleIKLeg_offset;
+		
+		parent $poleIKLeg_offset $rootControl;
+		sofa_rig_setHideAttributes( 1, $IKPoleVectorControl, "tx ty tz sx sy sz v" );
+		sofa_rig_setLockAttributes( 1, $IKPoleVectorControl, "tx ty tz sx sy sz" );
+		
+		// Create pole vector template curve
+		string $poleIKLeg_curve = ($prefix + "poleIKLeg_curve");
+		string $poleIKLeg_curve_cluster0 = ($prefix + "poleIKLeg_curve_cluster0");
+		string $poleIKLeg_curve_cluster1 = ($prefix + "poleIKLeg_curve_cluster1");
+		curve -d 1 -n $poleIKLeg_curve -p 0 0 0 -p 0 0 0 -k 0 -k 1 ;
+		setAttr ($poleIKLeg_curve+".inheritsTransform") 0;
+		TemplateObject;
+		select -r ($poleIKLeg_curve + ".cv[0] ");
+		newCluster " -envelope 1";
+		rename $poleIKLeg_curve_cluster0;
+		select -r ($poleIKLeg_curve + ".cv[1] ");
+		newCluster " -envelope 1";
+		rename $poleIKLeg_curve_cluster1;
+		pointConstraint $upperLegJoint $poleIKLeg_curve_cluster0;
+		float $upperLegPos[3] = `xform -q -ws -t $upperLegJoint`;
+		xform -ws -t $ploeVectorPos[0] $ploeVectorPos[1] $ploeVectorPos[2] $poleIKLeg_curve_cluster1;
+		parentConstraint -mo -skipRotate x -skipRotate y -skipRotate z -weight 1 $IKPoleVectorControl $poleIKLeg_curve_cluster1;
+		setAttr ($poleIKLeg_curve_cluster0 + ".visibility") 0;
+		setAttr ($poleIKLeg_curve_cluster1 + ".visibility") 0;
+		sofa_rig_setHideAttributes( 1, $poleIKLeg_curve_cluster0, "tx ty tz rx ry rz sx sy sz v" );
+		sofa_rig_setLockAttributes( 1, $poleIKLeg_curve_cluster0, "tx ty tz rx ry rz sx sy sz" );
+		
+		sofa_rig_setHideAttributes( 1, $poleIKLeg_curve_cluster1, "tx ty tz rx ry rz sx sy sz v" );
+		sofa_rig_setLockAttributes( 1, $poleIKLeg_curve_cluster1, "tx ty tz rx ry rz sx sy sz" );
+		
+		sofa_rig_setHideAttributes( 1, $poleIKLeg_curve, "tx ty tz rx ry rz sx sy sz v" );
+		sofa_rig_setLockAttributes( 1, $poleIKLeg_curve, "tx ty tz rx ry rz sx sy sz" );
+		
+		// ik strectch
+		$tmp = `spaceLocator -p 0 0 0 -n ($IKFootControl+"_Stretch_Multiplier")`;
+		string $globalScale = $tmp[0];
+		setAttr ($globalScale+".v") 0;
+		scaleConstraint -offset 1 1 1 -weight 1 $upperLegJoint $globalScale;
+		sofa_rig_setHideAttributes( 1, $globalScale, "tx ty tz rx ry rz sx sy sz v" );
+		sofa_rig_setLockAttributes( 1, $globalScale, "tx ty tz rx ry rz sx sy sz" );
+		sofa_rig_createStretchyIK(($FKHipControl+".IKFK_Blend"), $LegIKHandle, $IKFootControl, $globalScale, $legRig);			
+	
+
+		if ($isFKLeg && $isIKLeg)
+		{				
+			connectAttr -f ($FKHipControl+".IKFK_Blend") ($IKPoleVectorControl+".v");
+			connectAttr -f ($FKHipControl+".IKFK_Blend") ($IKFootControl+".v");
+			connectAttr -f ($FKHipControl+".IKFK_Blend") ($poleIKLeg_curve+".v");
+			
+			string $ss = `shadingNode -n ($FKHipControl+"_IKFK_Blend_reverse") -asUtility reverse`;
+			connectAttr -f ($FKHipControl+".IKFK_Blend") ($ss+".inputX");		
+
+			connectAttr -f ($ss+".outputX") ($FKUpperLegControl+".v");
+			if (`objExists $upperLeg2Joint`)
+				connectAttr -f ($ss+".outputX") ($FKUpperLegControl+"2.v");	
+			connectAttr -f ($ss+".outputX") ($FKLowerLegControl+".v");
+			if (`objExists $lowerLeg2Joint`)
+				connectAttr -f ($ss+".outputX") ($FKLowerLegControl+"2.v");	
+			connectAttr -f ($ss+".outputX") ($FKAnkleControl+".v");
+			connectAttr -f ($ss+".outputX") ($FKBallControl+".v");		
+
+			//	ikfk switch
+			int $rotateOrder;
+			// First we create instances for all arm control, we ned to query their value to restore the pose of IK or FK
+			string $FKUpperLegControl_IKFK_SWITCH = `group -em -n ($FKUpperLegControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($FKUpperLegControl_IKFK_SWITCH, $FKUpperLegControl, 1, 1);
+			$rotateOrder = `getAttr ($FKUpperLegControl+".rotateOrder")`;			
+			parentConstraint -mo -weight 1 $upperLegJoint $FKUpperLegControl_IKFK_SWITCH;
+			setAttr ($FKUpperLegControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;
+			
+			string $FKLowerLegControl_IKFK_SWITCH = `group -em -n ($FKLowerLegControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($FKLowerLegControl_IKFK_SWITCH, $FKLowerLegControl, 1, 1);
+			$rotateOrder = `getAttr ($FKLowerLegControl+".rotateOrder")`;			
+			parentConstraint -mo -weight 1 $lowerLegJoint $FKLowerLegControl_IKFK_SWITCH;
+			setAttr ($FKLowerLegControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;
+			
+			string $FKAnkleControl_IKFK_SWITCH = `group -em -n ($FKAnkleControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($FKAnkleControl_IKFK_SWITCH, $FKAnkleControl, 1, 1);
+			$rotateOrder = `getAttr ($FKAnkleControl+".rotateOrder")`;			
+			parentConstraint -mo -weight 1 $ankleJoint $FKAnkleControl_IKFK_SWITCH;
+			setAttr ($FKAnkleControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;
+			
+			string $FKBallControl_IKFK_SWITCH = `group -em -n ($FKBallControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($FKBallControl_IKFK_SWITCH, $FKBallControl, 1, 1);
+			$rotateOrder = `getAttr ($FKBallControl+".rotateOrder")`;			
+			parentConstraint -mo -weight 1 $ballJoint $FKBallControl_IKFK_SWITCH;
+			setAttr ($FKBallControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;
+			
+			string $IKPoleVectorControl_IKFK_SWITCH = `group -em -n ($IKPoleVectorControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($IKPoleVectorControl_IKFK_SWITCH, $IKPoleVectorControl, 1, 1);
+			$rotateOrder = `getAttr ($IKPoleVectorControl+".rotateOrder")`;			
+			parentConstraint -mo -weight 1 $upperLegJoint $IKPoleVectorControl_IKFK_SWITCH;
+			setAttr ($IKPoleVectorControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;
+			
+			string $IKFootControl_IKFK_SWITCH = `group -em -n ($IKFootControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($IKFootControl_IKFK_SWITCH, $IKFootControl, 1, 1);
+			$rotateOrder = `getAttr ($IKFootControl+".rotateOrder")`;			
+			parentConstraint -mo -weight 1 $ankleJoint $IKFootControl_IKFK_SWITCH;
+			setAttr ($IKFootControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;
+			
+			//clean up
+			parent $FKUpperLegControl_IKFK_SWITCH $FKLowerLegControl_IKFK_SWITCH $FKAnkleControl_IKFK_SWITCH $FKBallControl_IKFK_SWITCH $IKPoleVectorControl_IKFK_SWITCH $IKFootControl_IKFK_SWITCH $legRig;
+			parent $poleIKLegLocator_offset $globalScale $poleIKLeg_curve_cluster0 $poleIKLeg_curve_cluster1 $poleIKLeg_curve $legRig;
+		}
+	}
+	select -cl;
+}
+
+global proc sofa_rig_createArmRig( int $isIKArm, int $isFKArm, int $side, float $controlSize, int $controlColor, string $clavicleJoint, string $upperArmJoint, string $upperArm2Joint, string $lowerArmJoint, string $lowerArm2Joint, string $handJoint, int $isSpaceSwitch, string $headJoint, string $chestJoint, string $hipJoint, string $rootControl, int $isFlipPoleVector )
+{
+	if ( !`objExists $upperArmJoint` || !`objExists $lowerArmJoint` || !`objExists $handJoint` )
+		error "Joint doesn't exist.";
+		
+	select -cl;
+	sofa_rig_templateExistanceCheck;
+	global string $gTemplateAll, $gTemplateTransformA, $gTemplateTransformB, $gTemplateTransformC, $gTemplateDeformer, $gTemplateRig, $gTemplateGeometry, 
+	$gTemplateControl, $gTemplateSkeleton, $gTemplateBody_rig, $gTemplateFacial_rig, $gTemplateBody_control, $gTemplateFacial_control, $gTemplateBody_skeleton, 
+	$gTemplateFacial_skeleton;
+	global int $useNewNamingRule;
+	
+	$controlColor--;
+	
+	$rootControl = sofa_rig_getRealRootControl($rootControl);
+	string $prefix = sofa_rig_getPrefixName($side);
+	//rename
+	string $FKClavicleControl, $FKUpperArmControl, $FKLowerArmControl, $FKHandControl, $IKPoleVectorControl, $IKArmControl;
+	if(!$useNewNamingRule)
+	{	
+		$FKClavicleControl = ($prefix+ "SHOULDER_CONTROL");
+		$FKUpperArmControl = ($prefix+ "FK_UPPERARM_CONTROL");
+		$FKLowerArmControl = ($prefix+ "FK_ELBOW_CONTROL");
+		$FKHandControl = ($prefix+ "Hand_Control");	
+		$IKPoleVectorControl = ($prefix+ "IKArm_Pole");
+		$IKArmControl = ($prefix+ "IKArm_Control");
+	}
+	else
+	{
+		$FKClavicleControl = ($prefix+ "shoulder_ctl_fk");
+		$FKUpperArmControl = ($prefix+ "arm_ctl_fk");
+		$FKLowerArmControl = ($prefix+ "elbow_ctl_fk");
+		$FKHandControl = ($prefix+ "hand_ctl_fk");	
+		$IKPoleVectorControl = ($prefix+ "elbow_ctl_ik");
+		$IKArmControl = ($prefix+ "hand_ctl_ik");
+	}	
+	
+	string $armRig = `group -em -n ($prefix+ "arm_rig")`;
+	string $armScaleRig = `group -em -n ($prefix+ "arm_scale_rig")`;
+	parent $armScaleRig $armRig;
+	parent $armRig $gTemplateBody_rig;
+	scaleConstraint -offset 1 1 1 -weight 1 $rootControl $armScaleRig;
+	
+	string $buf[1] = `listRelatives -p $clavicleJoint`;	
+	string $parentJointOfClavicle = $buf[0];
+	
+	if ($isFKArm)
+	{				
+		// create clavicle FK control			
+		float $dis = sofa_rig_getDistance( $parentJointOfClavicle, $clavicleJoint );		
+		sofa_rig_createControl( $parentJointOfClavicle, 1, $clavicleJoint, 1, $upperArmJoint, $FKClavicleControl, 2, $controlColor, 0, $rootControl, $armScaleRig, 0, 0, $rootControl, $side, $controlSize, $dis/2, $dis, 0, 0,0,0,90, 0, 0, 1, ("m_bodyCtl_set "+tolower($prefix)+"armCtl_set") );
+		//add IKFK blend attr
+		addAttr -ln "IKFK_Blend" -at double -dv 1 -min 0 -max 1 $FKClavicleControl;
+		setAttr -e -keyable true ($FKClavicleControl+".IKFK_Blend");		
+		
+		// create upper arm FK control
+		$buf = `listRelatives -p $upperArmJoint`;
+		if (`objExists $upperArm2Joint`)
+		{			
+			sofa_rig_createControl( $buf[0], 1, $upperArmJoint, 1, $upperArm2Joint, $FKUpperArmControl, 1, $controlColor, 1, $rootControl, $armScaleRig, 1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0, 0,0,0,0, 0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"armCtl_set") );
+			$buf = `listRelatives -p $upperArm2Joint`;
+			sofa_rig_createControl( $buf[0], 1, $upperArm2Joint, 1, $lowerArmJoint, ($FKUpperArmControl+"2"), 1, $controlColor, 1, $rootControl, $armScaleRig, 1, 1, $rootControl, $side, $controlSize, 0, 0, 0,0,0,0, 0, 0, 0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"armCtl_set") );
+		}
+		else
+			sofa_rig_createControl( $buf[0], 1, $upperArmJoint, 1, $lowerArmJoint, $FKUpperArmControl, 1, $controlColor, 1, $rootControl, $armScaleRig, 1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0, 0,0,0,0, 0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"armCtl_set") );
+	
+		// create lower arm FK control	
+		$buf = `listRelatives -p $lowerArmJoint`;
+		if (`objExists $lowerArm2Joint`)
+		{
+			sofa_rig_createControl( $buf[0], 1, $lowerArmJoint, 1, $lowerArm2Joint, $FKLowerArmControl, 1, $controlColor, 0, $rootControl, $armScaleRig, 1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0,0,0,0, 0, 0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"armCtl_set") );
+			$buf = `listRelatives -p $lowerArm2Joint`;
+			sofa_rig_createControl( $buf[0], 1, $lowerArm2Joint, 1, $handJoint, ($FKLowerArmControl+"2"), 1, $controlColor, 1, $rootControl, $armScaleRig, 1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0,0,0,0, 0, 0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"armCtl_set") );
+		}
+		else
+			sofa_rig_createControl( $buf[0], 1, $lowerArmJoint, 1, $handJoint, ($FKLowerArmControl), 1, $controlColor, 1, $rootControl, $armScaleRig, 1, 1, $rootControl, $side, $controlSize, 0, 0, 0, 0,0,0,0, 0, 0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"armCtl_set") );
+		//The elbow can only rotate one axis
+		sofa_rig_setLockAttributes( 1, $FKLowerArmControl, "rx ry" );
+		sofa_rig_setHideAttributes( 1, $FKLowerArmControl, "rx ry" );
+
+		// create hand FK control
+		$buf = `listRelatives -p $handJoint`;
+		sofa_rig_createControl( $buf[0], 1, $handJoint, 1, "", $FKHandControl, 1, $controlColor, 1, $rootControl, $armScaleRig, 0, 1, $rootControl, $side, $controlSize, 0, 0,0,0,0, 0, 0, 0, 0, 1, ("m_bodyCtl_set m_fkCtl_set "+tolower($prefix)+"armCtl_set") );
+	}
+	
+	int $wristRotateOrder = `getAttr ($handJoint+".rotateOrder")`;	
+	if ($isIKArm)
+	{				
+		// create hand IK control
+		
+		string $empty1 = `group -em`;
+		string $empty2 = `group $empty1`;		
+		sofa_rig_alignAndAttach( $empty2, $handJoint,0 , 1 );
+		float $rot[3] = `xform -q -ws -ro $empty2`;
+		setAttr ($empty1+".rx") (-1*$rot[0]);
+		ungroup $empty2;
+		string $tmp[] = sofa_rig_createControl( "", 0, $empty1, 1, "", $IKArmControl, 3, $controlColor, 0, $rootControl, $armScaleRig, 0, 1, $rootControl, $side, $controlSize, 0, 0, 0,0,0,0, 0, 0, 0, 0, ("m_bodyCtl_set m_ikCtl_set "+tolower($prefix)+"armCtl_set") );
+		delete $empty1;
+		$IKArmControl = $tmp[0];
+		parentConstraint -mo -skipTranslate x -skipTranslate y -skipTranslate z -weight 1 $IKArmControl $handJoint;		
+		
+		sofa_rig_setLockAttributes( 0, $IKArmControl, "tx ty tz" );
+		sofa_rig_setHideAttributes( 0, $IKArmControl, "tx ty tz" );
+		setAttr -k 1 ($IKArmControl+".tx");
+		setAttr -k 1 ($IKArmControl+".ty");
+		setAttr -k 1 ($IKArmControl+".tz");
+		
+		// create space switch		 : 		$headJoint  $chestJoint  $hipJoint  $rootControl 
+		if ( $isSpaceSwitch )
+		{
+			if (!`objExists $headJoint`)
+				error ($headJoint+" doesn't exist.");
+			if (!`objExists $chestJoint`)
+				error ($chestJoint+" doesn't exist.");
+			if (!`objExists $hipJoint`)
+				error ($hipJoint+" doesn't exist.");
+			if (!`objExists $rootControl`)
+				error ($rootControl+" doesn't exist.");
+				
+			string $IKArm_head_follow = `group -em -n ($IKArmControl+"_follow_head")`;
+			setAttr ($IKArm_head_follow+".rotateOrder") $wristRotateOrder;
+			sofa_rig_alignAndAttach($IKArm_head_follow, $tmp[2], 1, 1);
+			string $IKArm_head_follow_offset = `group -n ($IKArm_head_follow+"_offset") $IKArm_head_follow`;
+			setAttr ($IKArm_head_follow_offset+".rotateOrder") $wristRotateOrder;
+			
+			string $IKArm_chest_follow = `group -em -n ($IKArmControl+"_follow_chest")`;
+			setAttr ($IKArm_chest_follow+".rotateOrder") $wristRotateOrder;
+			sofa_rig_alignAndAttach($IKArm_chest_follow, $tmp[2], 1, 1);
+			string $IKArm_chest_follow_offset = `group -n ($IKArm_chest_follow+"_offset") $IKArm_chest_follow`;
+			setAttr ($IKArm_chest_follow_offset+".rotateOrder") $wristRotateOrder;		
+			
+			string $IKArm_hip_follow = `group -em -n ($IKArmControl+"_follow_hip")`;
+			setAttr ($IKArm_hip_follow+".rotateOrder") $wristRotateOrder;
+			sofa_rig_alignAndAttach($IKArm_hip_follow, $tmp[2], 1, 1);
+			string $IKArm_hip_follow_offset = `group -n ($IKArm_hip_follow+"_offset") $IKArm_hip_follow`;
+			setAttr ($IKArm_hip_follow_offset+".rotateOrder") $wristRotateOrder;
+			
+			string $IKArm_root_follow = `group -em -n ($IKArmControl+"_follow_root")`;
+			setAttr ($IKArm_root_follow+".rotateOrder") $wristRotateOrder;
+			sofa_rig_alignAndAttach($IKArm_root_follow, $tmp[2], 1, 1);
+			string $IKArm_root_follow_offset = `group -n ($IKArm_root_follow+"_offset") $IKArm_root_follow`;
+			setAttr ($IKArm_root_follow_offset+".rotateOrder") $wristRotateOrder;
+			
+			string $IKArm_free_follow = `group -em -n ($IKArmControl+"_follow_free")`;
+			setAttr ($IKArm_free_follow+".rotateOrder") $wristRotateOrder;
+			sofa_rig_alignAndAttach($IKArm_free_follow, $tmp[2], 1, 1);
+			string $IKArm_free_follow_offset = `group -n ($IKArm_free_follow+"_offset") $IKArm_free_follow`;
+			setAttr ($IKArm_free_follow_offset+".rotateOrder") $wristRotateOrder;
+					
+			// Create free control for hand space switching
+			string $result[] = sofa_rig_createControl( "", 0, "", 0, "", ($prefix + "handAnchor_ctl_con"), 13, $controlColor, 0, "", "", 0, 0,	"", 0,$controlSize, 0,0,0,0,0,0,0,0,0,0, "m_bodyCtl_set" );
+			sofa_rig_setHideAttributes( 1, $result[0] , "sx sy sz v" );
+			sofa_rig_setLockAttributes( 1, $result[0] , "sx sy sz" );
+			string $IKArm_free_locator = $result[0];
+			parent $IKArm_free_locator $rootControl;
+			delete $result[2];			
+
+			parentConstraint -mo -weight 1 $headJoint $IKArm_head_follow_offset;
+			parentConstraint -mo -weight 1 $chestJoint $IKArm_chest_follow_offset;
+			parentConstraint -mo -weight 1 $hipJoint $IKArm_hip_follow_offset;
+			parentConstraint -mo -weight 1 $rootControl $IKArm_root_follow_offset;
+			parentConstraint -mo -weight 1 $IKArm_free_locator $IKArm_free_follow_offset;
+			
+			$result = `parentConstraint -mo -weight 1 $IKArm_head_follow $IKArm_chest_follow $IKArm_hip_follow $IKArm_free_follow $IKArm_root_follow $tmp[2]`;
+			
+			addAttr -ln ("followHead") -at double -dv 0 -min 0 -max 1 $IKArmControl;
+			setAttr -e -keyable true ($IKArmControl+".followHead");
+			
+			addAttr -ln ("followChest") -at double -dv 1 -min 0 -max 1 $IKArmControl;
+			setAttr -e -keyable true ($IKArmControl+".followChest");
+			
+			addAttr -ln ("followHip") -at double -dv 0 -min 0 -max 1 $IKArmControl;
+			setAttr -e -keyable true ($IKArmControl+".followHip");
+			
+			addAttr -ln ("followRoot") -at double -dv 0 -min 0 -max 1 $IKArmControl;
+			setAttr -e -keyable true ($IKArmControl+".followRoot");
+			
+			addAttr -ln "followFree" -at double -dv 0 -min 0 -max 1 $IKArmControl;
+			setAttr -e -keyable true ($IKArmControl+".followFree");
+			connectAttr -f ($IKArmControl+".followFree") ($IKArm_free_locator+".v");
+			
+			string $addNode = `shadingNode -asUtility plusMinusAverage`;
+			string $clampNode = `shadingNode -asUtility clamp`;
+			setAttr ($clampNode+".maxR") 1;
+			string $reverseNode = `shadingNode -asUtility reverse`;
+			
+			connectAttr -f ($IKArmControl+".followHead") ($addNode+".input1D[0]");
+			connectAttr -f ($IKArmControl+".followChest") ($addNode+".input1D[1]");
+			connectAttr -f ($IKArmControl+".followHip") ($addNode+".input1D[2]");
+			connectAttr -f ($IKArmControl+".followFree") ($addNode+".input1D[3]");
+			
+			connectAttr -f ($addNode+".output1D") ($clampNode+".inputR");
+			connectAttr -f ($clampNode+".outputR") ($reverseNode+".inputX");
+			
+			connectAttr -f ($IKArmControl+".followHead") ($result[0]+"."+$IKArm_head_follow+"W0");
+			connectAttr -f ($IKArmControl+".followChest") ($result[0]+"."+$IKArm_chest_follow+"W1");
+			connectAttr -f ($IKArmControl+".followHip") ($result[0]+"."+$IKArm_hip_follow+"W2");
+			connectAttr -f ($IKArmControl+".followFree") ($result[0]+"."+$IKArm_free_follow+"W3");
+			connectAttr -f ($reverseNode+".outputX") ($result[0]+"."+$IKArm_root_follow+"W4");
+			
+			//clean up
+			parent $IKArm_head_follow_offset $IKArm_chest_follow_offset $IKArm_root_follow_offset $IKArm_hip_follow_offset $IKArm_free_follow_offset $armRig;
+		}	// end of space switch
+
+		// create ik handle		
+		$result = `ikHandle -solver ikRPsolver -startJoint $upperArmJoint -endEffector $handJoint -n ($IKArmControl+"_handle")`;
+		string $ArmIKHandle = $result[0];
+		connectAttr -f ($FKClavicleControl+".IKFK_Blend") ($ArmIKHandle+".ikBlend");		
+		setAttr ($ArmIKHandle + ".v") 0;	
+		setAttr ($ArmIKHandle + ".stickiness") 1;
+		pointConstraint -mo -weight 1 $IKArmControl $ArmIKHandle;		
+
+		// If hand joint is controled both by FK and IK, Maya will create pairblend automatically
+		// We dont expect that so in here we delete pairblend and parentConstrain nodes and redo the parentConstrains for FK and IK
+		if ($isFKArm) 
+		{
+			/*find all pairblend and parentConstrain nodes*/
+			string $pairBlend[1] = `listConnections -s 1 -d 0 ($handJoint+".rx")`;
+				
+			$tmp = `listConnections -s 1 -d 0 ($pairBlend[0]+".inRotateX1")`;	
+			string $controlJoint1[1] = `listConnections -s 1 -d 0 ($tmp[0]+".target[0].targetRotate")`;
+			string $cmd = ("delete "+$tmp[0]+";");
+			
+			$tmp = `listConnections -s 1 -d 0 ($pairBlend[0]+".inRotateX2")`;	
+			string $controlJoint2[1] = `listConnections -s 1 -d 0 ($tmp[0]+".target[0].targetRotate")`;
+			$cmd += ("delete "+$tmp[0]+";");
+			eval $cmd;
+
+			/*connect parentConstraint weight with IKFK blender*/
+			string $parentConstrain[] = `parentConstraint -mo -skipTranslate x -skipTranslate y -skipTranslate z -weight 1 $controlJoint1[0] $controlJoint2[0] $handJoint`;	
+			connectAttr -f ($FKClavicleControl+".IKFK_Blend") ($parentConstrain[0]+"."+$controlJoint2[0]+"W1");
+			string $handControlReverse = `shadingNode -n ($IKArmControl+"_reverse") -asUtility reverse`;			
+			connectAttr -f ($FKClavicleControl+".IKFK_Blend") ($handControlReverse+".inputX");
+			connectAttr -f ($handControlReverse+".outputX") ($parentConstrain[0]+"."+$controlJoint1[0]+"W0");		
+		}
+		
+		// create pole vector for ik handle
+		float $poleVectorValue[3] = `getAttr ($ArmIKHandle+".poleVector")`;
+		float $upperArmPos[3] = `xform -q -ws -t $upperArmJoint`;		
+		$tmp = `spaceLocator -p 0 0 0 -n ($IKArmControl + "_Pole_Locator")`;
+		string $poleIKArmLocator = $tmp[0];
+		string $poleIKArmLocator_offset = `group -em -n ($poleIKArmLocator + "_offset")`;
+		parent $poleIKArmLocator $poleIKArmLocator_offset;
+		setAttr ($poleIKArmLocator_offset+".translate") $upperArmPos[0] $upperArmPos[1] $upperArmPos[2] ;
+		setAttr ($poleIKArmLocator+".translate") $poleVectorValue[0] $poleVectorValue[1] $poleVectorValue[2] ;
+		poleVectorConstraint $poleIKArmLocator $ArmIKHandle;
+		setAttr ($poleIKArmLocator_offset+".v") 0;
+		
+		string $poleIKArm_orient = `group -em -n ($IKPoleVectorControl + "_orient")`;
+		$result = sofa_rig_createControl( "", 0, "", 0, "", $IKPoleVectorControl, 3, $controlColor, 0, "", "", 0, 0, $gTemplateControl, 0, ($controlSize/2), 0, 0, 0, 0,0,0,0, 0, 0, 0, ("m_bodyCtl_set m_ikCtl_set "+tolower($prefix)+"armCtl_set") );
+		$IKPoleVectorControl = $result[0];
+		parent $IKPoleVectorControl $poleIKArm_orient;
+		delete $result[2];	
+		// In order to keep both side rotate in opposite direction, we must adjust the oritation of right side
+		if ( $side == 2 )
+			setAttr ($poleIKArm_orient+".rotate") 180 0 0;
+		
+		string $poleIKArm_offset = `group -em -n ($IKPoleVectorControl + "_offset")`;		
+		parent $poleIKArm_orient $poleIKArm_offset;			
+		setAttr ($poleIKArm_offset+".translate") $upperArmPos[0] $upperArmPos[1] $upperArmPos[2] ;	
+		
+		// Here we take the length from shoulder to hand as the distance of pole vector
+		float $handPos[3] = `xform -q -ws -t $handJoint`;		
+		float $poleVectorDistance = sofa_rig_getDistance($handJoint, $upperArmJoint);
+		
+		// Find out which axis is the the prefer angle of IK handle
+		float $poleVectorOffset[3];
+		if ( abs($poleVectorValue[0]) > abs($poleVectorValue[1]) && abs($poleVectorValue[0]) > abs($poleVectorValue[2]) )
+		{
+			int $factor = 1;
+			if ( $poleVectorValue[0] < 0 )
+				$factor = -1;
+			$poleVectorOffset[0] = $poleVectorDistance * $factor;		
+		}
+		if ( abs($poleVectorValue[1]) > abs($poleVectorValue[0]) && abs($poleVectorValue[1]) > abs($poleVectorValue[2]) )
+		{
+			int $factor = 1;
+			if ( $poleVectorValue[1] < 0 )
+				$factor = -1;
+			$poleVectorOffset[1] = $poleVectorDistance * $factor;		
+		}
+		if ( abs($poleVectorValue[2]) > abs($poleVectorValue[0]) && abs($poleVectorValue[2]) > abs($poleVectorValue[1]) )
+		{
+			int $factor = 1;
+			if ( $poleVectorValue[2] < 0 )
+				$factor = -1;
+			$poleVectorOffset[2] = $poleVectorDistance * $factor;		
+		}	
+		
+		int $flip = 1;
+		if ($isFlipPoleVector)
+			$flip = -1;
+		xform -ws -r -t ($poleVectorOffset[0]*$flip) ($poleVectorOffset[1]*$flip) ($poleVectorOffset[2]*$flip) $poleIKArm_offset; 
+		float $ploeVectorPos[3] = `xform -q -ws -t $poleIKArm_offset`;
+		
+		xform -ws -t $upperArmPos[0] $upperArmPos[1] $upperArmPos[2] ($IKPoleVectorControl+".scalePivot"); 
+		xform -ws -t $upperArmPos[0] $upperArmPos[1] $upperArmPos[2] ($IKPoleVectorControl+".rotatePivot"); 
+		xform -ws -t $upperArmPos[0] $upperArmPos[1] $upperArmPos[2] ($poleIKArm_offset+".scalePivot"); 
+		xform -ws -t $upperArmPos[0] $upperArmPos[1] $upperArmPos[2] ($poleIKArm_offset+".rotatePivot"); 
+		xform -ws -t $upperArmPos[0] $upperArmPos[1] $upperArmPos[2] ($poleIKArm_orient+".scalePivot"); 
+		xform -ws -t $upperArmPos[0] $upperArmPos[1] $upperArmPos[2] ($poleIKArm_orient+".rotatePivot"); 
+		
+		parentConstraint -mo -weight 1 $IKPoleVectorControl $poleIKArmLocator_offset;		
+		pointConstraint -offset 0 0 0 -weight 1 $upperArmJoint $poleIKArm_orient;
+		parentConstraint -mo -weight 1 $parentJointOfClavicle $poleIKArm_offset;
+		
+		parent $poleIKArm_offset $rootControl;
+		sofa_rig_setHideAttributes( 1, $IKPoleVectorControl, "tx ty tz sx sy sz v" );
+		sofa_rig_setLockAttributes( 1, $IKPoleVectorControl, "tx ty tz sx sy sz" );
+
+		
+		// Create pole vector template curve
+		string $poleIKArm_curve = ($prefix + "poleIKArm_curve");
+		string $poleIKArm_curve_cluster0 = ($prefix + "poleIKArm_curve_cluster0");
+		string $poleIKArm_curve_cluster1 = ($prefix + "poleIKArm_curve_cluster1");
+		curve -d 1 -n $poleIKArm_curve -p 0 0 0 -p 0 0 0 -k 0 -k 1 ;
+		setAttr ($poleIKArm_curve+".inheritsTransform") 0;
+		TemplateObject;
+		select -r ($poleIKArm_curve + ".cv[0] ");
+		newCluster " -envelope 1";
+		rename $poleIKArm_curve_cluster0;
+		select -r ($poleIKArm_curve + ".cv[1] ");
+		newCluster " -envelope 1";
+		rename $poleIKArm_curve_cluster1;
+		pointConstraint $upperArmJoint $poleIKArm_curve_cluster0;
+		xform -ws -t $ploeVectorPos[0] $ploeVectorPos[1] $ploeVectorPos[2] $poleIKArm_curve_cluster1;	
+		parentConstraint -mo -skipRotate x -skipRotate y -skipRotate z -weight 1 $IKPoleVectorControl $poleIKArm_curve_cluster1;
+		setAttr ($poleIKArm_curve_cluster0 + ".visibility") 0;
+		setAttr ($poleIKArm_curve_cluster1 + ".visibility") 0;
+		sofa_rig_setHideAttributes( 1, $poleIKArm_curve_cluster0, "tx ty tz rx ry rz sx sy sz v" );
+		sofa_rig_setLockAttributes( 1, $poleIKArm_curve_cluster0, "tx ty tz rx ry rz sx sy sz" );
+		
+		sofa_rig_setHideAttributes( 1, $poleIKArm_curve_cluster1, "tx ty tz rx ry rz sx sy sz v" );
+		sofa_rig_setLockAttributes( 1, $poleIKArm_curve_cluster1, "tx ty tz rx ry rz sx sy sz" );
+		
+		sofa_rig_setHideAttributes( 1, $poleIKArm_curve, "tx ty tz rx ry rz sx sy sz v" );
+		sofa_rig_setLockAttributes( 1, $poleIKArm_curve, "tx ty tz rx ry rz sx sy sz" );
+
+		sofa_rig_createStretchyIK(($FKClavicleControl+".IKFK_Blend"), $ArmIKHandle, $IKArmControl, $armScaleRig, $armRig);			
+		
+		if ($isFKArm && $isIKArm)
+		{				
+			connectAttr -f ($FKClavicleControl+".IKFK_Blend") ($IKPoleVectorControl+".v");
+			connectAttr -f ($FKClavicleControl+".IKFK_Blend") ($IKArmControl+".v");
+			connectAttr -f ($FKClavicleControl+".IKFK_Blend") ($poleIKArm_curve+".v");
+			
+			string $ss = `shadingNode -n ($FKClavicleControl+"_IKFK_Blend_reverse") -asUtility reverse`;
+			connectAttr -f ($FKClavicleControl+".IKFK_Blend") ($ss+".inputX");
+			
+			connectAttr -f ($ss+".outputX") ($FKUpperArmControl+".v");
+			if (`objExists $upperArm2Joint`)
+				connectAttr -f ($ss+".outputX") ($FKUpperArmControl+"2.v");		
+			connectAttr -f ($ss+".outputX") ($FKLowerArmControl+".v");
+			if (`objExists $lowerArm2Joint`)
+				connectAttr -f ($ss+".outputX") ($FKLowerArmControl+"2.v");
+			connectAttr -f ($ss+".outputX") ($FKHandControl+".v");		
+
+			//	ikfk switch
+			int $rotateOrder;
+			// First we create instances for all arm control, we ned to query their value to restore the pose of IK or FK
+			string $FKUpperArmControl_IKFK_SWITCH = `group -em -n ($FKUpperArmControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($FKUpperArmControl_IKFK_SWITCH, $FKUpperArmControl, 1, 1);
+			$rotateOrder = `getAttr ($FKUpperArmControl+".rotateOrder")`;
+			parentConstraint -mo -weight 1 $upperArmJoint $FKUpperArmControl_IKFK_SWITCH;
+			setAttr ($FKUpperArmControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;
+			
+			string $FKLowerArmControl_IKFK_SWITCH = `group -em -n ($FKLowerArmControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($FKLowerArmControl_IKFK_SWITCH, $FKLowerArmControl, 1, 1);
+			$rotateOrder = `getAttr ($FKLowerArmControl+".rotateOrder")`;			
+			parentConstraint -mo -weight 1 $lowerArmJoint $FKLowerArmControl_IKFK_SWITCH;
+			setAttr ($FKLowerArmControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;
+			
+			string $FKHandControl_IKFK_SWITCH = `group -em -n ($FKHandControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($FKHandControl_IKFK_SWITCH, $FKHandControl, 1, 1);
+			$rotateOrder = `getAttr ($FKHandControl+".rotateOrder")`;		
+			parentConstraint -mo -weight 1 $handJoint $FKHandControl_IKFK_SWITCH;
+			setAttr ($FKHandControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;			
+			
+			string $IKPoleVectorControl_IKFK_SWITCH = `group -em -n ($IKPoleVectorControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($IKPoleVectorControl_IKFK_SWITCH, $IKPoleVectorControl, 1, 1);
+			$rotateOrder = `getAttr ($IKPoleVectorControl+".rotateOrder")`;			
+			parentConstraint -mo -weight 1 $upperArmJoint $IKPoleVectorControl_IKFK_SWITCH;
+			setAttr ($IKPoleVectorControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;
+			
+			string $IKArmControl_IKFK_SWITCH = `group -em -n ($IKArmControl+ "_ikfk_switch")`;
+			sofa_rig_alignAndAttach($IKArmControl_IKFK_SWITCH, $IKArmControl, 1, 1);
+			$rotateOrder = `getAttr ($IKArmControl+".rotateOrder")`;			
+			parentConstraint -mo -weight 1 $handJoint $IKArmControl_IKFK_SWITCH;
+			setAttr ($IKArmControl_IKFK_SWITCH+".rotateOrder") $rotateOrder;
+			
+			//clean up
+			parent $FKUpperArmControl_IKFK_SWITCH $FKLowerArmControl_IKFK_SWITCH $FKHandControl_IKFK_SWITCH $IKPoleVectorControl_IKFK_SWITCH $IKArmControl_IKFK_SWITCH $armRig;
+			parent $ArmIKHandle $poleIKArmLocator_offset $poleIKArm_curve_cluster0 $poleIKArm_curve_cluster1 $poleIKArm_curve $armRig;
+		}
+	}
+	select -cl;
+}
+
+global proc addExtraParentControl( string $extraCtrl, string $orgCtrl, int $translateChk, int $rotateChk, int $scaleChk)
+{	
+	int $mode;
+	string $sel[];
+	if( $extraCtrl == "" && $orgCtrl == "" )
+	{
+		$mode = 1;
+		$sel = `ls -sl`;	
+	}
+	else
+	{
+		if( `objExists $extraCtrl` && `objExists $orgCtrl` )
+		{
+			$mode = 2;
+			$sel[0] = $orgCtrl;		
+		}
+		else
+			return;	
+	}
+	
+	string $tmp[1];
+	for ( $thisSelection in $sel )
+	{
+		if ( `nodeType $thisSelection` == "transform" )
+		{	
+			string $newCtrl;			
+			if($mode==2)
+				$newCtrl = $extraCtrl;	
+			else
+			{
+				$tmp = `listRelatives -p $thisSelection`;
+				if( size($tmp) == 0 )
+					continue;
+					
+				string $array[];
+				string $nn;
+				$array = stringToStringArray($thisSelection, "_");
+				if( size($array) > 2 )
+				{
+					int $m = size($array)-1;
+					$array[$m] = "parent";
+					$nn = stringArrayToString($array, "_");				
+				}
+				else
+					$nn = $thisSelection + "_parent";
+				
+				if( `objExists $nn` )
+					$newCtrl = `group -em`;
+				else
+					$newCtrl = `group -em -n $nn`;
+					
+				string $del[1];
+				$del = `pointConstraint -offset 0 0 0 -weight 1 $thisSelection $newCtrl`;
+				delete $del[0];
+				$del = `orientConstraint -offset 0 0 0 -weight 1 $thisSelection $newCtrl`;
+				delete $del[0];			
+				
+				parent $newCtrl $tmp[0];
+				makeIdentity -apply true -t 1 -r 0 -s 0 -n 0 $newCtrl;	
+				parent $thisSelection $newCtrl;
+			}	
+			
+			string $outAttrs[];
+			if($translateChk)
+			{
+				string $string2[] = { "tx", "ty", "tz", "t" };
+				$outAttrs = stringArrayCatenate( $outAttrs, $string2 );
+			}
+			if($rotateChk)
+			{
+				string $string2[] = { "rx", "ry", "rz", "r" };
+				$outAttrs = stringArrayCatenate( $outAttrs, $string2 );
+			}
+			if($scaleChk)
+			{
+				string $string2[] = { "sx", "sy", "sz", "s" };
+				$outAttrs = stringArrayCatenate( $outAttrs, $string2 );
+			}
+			 
+			for( $outAttr in $outAttrs )
+			{
+				string $destAttrs[] = `listConnections -skipConversionNodes 1 -s 0 -d 1 -p 1 ($thisSelection+"."+$outAttr)`;	
+				
+				for( $destAttr in $destAttrs )
+				{	
+					string $outputNode = `match "^[^\.]*" $destAttr`;	
+					string $nodeType = `nodeType $outputNode`;			
+					if( $nodeType == "pointConstraint" || $nodeType == "orientConstraint" || $nodeType == "scaleConstraint" || $nodeType == "parentConstraint" )
+						continue;
+					else
+					{
+						/*
+						if( $nodeType == "unitConversion" )
+							delete $outputNode;	
+						*/
+						if ( $destAttr != "" )
+						{
+							if( $outAttr == "r" || $outAttr == "t" ||$outAttr == "s" )
+							{
+								string $addnode;
+								if( `gmatch $outAttr "s*"` )
+								{
+									$addnode = `createNode multiplyDivide`;
+									connectAttr -f ($addnode+".output") $destAttr;
+									connectAttr -f ($thisSelection+"."+$outAttr) ($addnode+".input2");
+									connectAttr -f ($newCtrl+"."+$outAttr) ($addnode+".input1");
+								}
+								else
+								{
+									$addnode = `createNode plusMinusAverage`;
+									connectAttr -f ($addnode+".output3D") $destAttr;
+									connectAttr -f ($thisSelection+"."+$outAttr) ($addnode+".input3D[0]");
+									connectAttr -f ($newCtrl+"."+$outAttr) ($addnode+".input3D[1]");		
+								}
+							}
+							else
+							{
+								string $addnode;
+								if( `gmatch $outAttr "s*"` )
+									$addnode = `createNode multDoubleLinear`;
+								else
+									$addnode = `createNode addDoubleLinear`;									
+								connectAttr -f ($addnode+".output") $destAttr;
+								connectAttr -f ($thisSelection+"."+$outAttr) ($addnode+".input1");
+								connectAttr -f ($newCtrl+"."+$outAttr) ($addnode+".input2");	
+							}			
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+/*
+proc addMemberToSet( string $mainSet, string $set, string $members[] )
+{
+	if( `objExists $set` )
+	{
+		sets -clear $set;
+		delete $set;
+	}
+	sets -name $set;
+		
+	if( !`sets -isMember $mainSet $set` )		
+		sets -add $mainSet $set;	
+
+	for( $member in $members )
+	{
+		if( `objExists $member` && !(`sets -isMember $set $member`) )					
+			sets -add $set $member;
+	}	
+}
+
+global proc reCreateControlSet( int $body, int $facial )
+{
+	// body set
+	if($body)
+	{		
+		string $mainSet = "m_ctl_set";
+		if( `objExists $mainSet` )
+		{
+			sets -clear $mainSet;
+			delete $mainSet;
+		}	
+		sets -name $mainSet;	
+		string $l_armCtl_members[] = { "L_Thumb_Control", "L_Thumb_Control_0", "L_Index_Control", "L_Index_Control_0", "L_Middle_Control", "L_Middle_Control_0", "L_Ring_Control", "L_Ring_Control_0", "L_Pinky_Control", "L_Pinky_Control_0", "L_SHOULDER_CONTROL", "L_FK_UPPERARM_CONTROL", "L_FK_ELBOW_CONTROL", "L_Hand_Control", "L_IKArm_Control", "L_IKArm_Pole"  };
+		string $l_legCtl_members[] = { "L_Hip_Rot", "L_FK_FEMUR_CONTROL", "L_FK_KNEE_CONTROL", "L_FK_ANKLE_CONTROL", "L_FK_BALL_CONTROL", "L_IKFootControl", "L_IKLeg_Pole"  };
+		string $r_armCtl_members[] = { "R_SHOULDER_CONTROL", "R_FK_UPPERARM_CONTROL", "R_FK_ELBOW_CONTROL", "R_Hand_Control", "R_IKArm_Control", "R_IKArm_Pole", "R_Thumb_Control", "R_Thumb_Control_0", "R_Index_Control", "R_Index_Control_0", "R_Middle_Control", "R_Middle_Control_0", "R_Ring_Control", "R_Ring_Control_0", "R_Pinky_Control", "R_Pinky_Control_0"  };
+		string $r_legCtl_members[] = { "R_Hip_Rot", "R_FK_FEMUR_CONTROL", "R_FK_KNEE_CONTROL", "R_FK_ANKLE_CONTROL", "R_FK_BALL_CONTROL", "R_IKFootControl", "R_IKLeg_Pole"  };
+		string $n_ikCtl_members[] = { "R_IKArm_Control", "R_IKArm_Pole", "L_IKFootControl", "L_IKLeg_Pole", "m_hip_ctl_ik", "m_spine1_ctl_ik", "m_spine2_ctl_ik", "m_spine3_ctl_ik", "m_chest_ctl_ik", "m_neck_ctl_ik", "m_head_ctl_ik", "R_IKFootControl", "R_IKLeg_Pole", "L_IKArm_Control", "L_IKArm_Pole"  };
+		string $n_fkCtl_members[] = { "R_FK_UPPERARM_CONTROL", "R_FK_ELBOW_CONTROL", "R_Hand_Control", "L_FK_FEMUR_CONTROL", "L_FK_KNEE_CONTROL", "L_FK_ANKLE_CONTROL", "L_FK_BALL_CONTROL", "R_FK_FEMUR_CONTROL", "R_FK_KNEE_CONTROL", "R_FK_ANKLE_CONTROL", "R_FK_BALL_CONTROL", "BOTTOM_CONTROL", "LOWER_TORSO_CONTROL", "WAIST1_CONTROL", "UPPER_TORSO_CONTROL", "NECK_CONTROL", "HEAD_CONTROL", "L_FK_UPPERARM_CONTROL", "L_FK_ELBOW_CONTROL", "L_Hand_Control"  };
+		string $n_bodyCtl_members[] = { "R_SHOULDER_CONTROL", "R_FK_UPPERARM_CONTROL", "R_FK_ELBOW_CONTROL", "R_Hand_Control", "R_IKArm_Control", "R_handAnchor_ctl_con", "R_IKArm_Pole", "L_Hip_Rot", "L_FK_FEMUR_CONTROL", "L_FK_KNEE_CONTROL", "L_FK_ANKLE_CONTROL", "L_FK_BALL_CONTROL", "L_IKFootControl", "L_IKLeg_Pole", "m_hip_ctl_ik", "m_spine1_ctl_ik", "m_spine2_ctl_ik", "m_spine3_ctl_ik", "m_chest_ctl_ik", "m_neck_ctl_ik", "m_head_ctl_ik", "L_Thumb_Control", "L_Thumb_Control_0", "L_Index_Control", "L_Index_Control_0", "L_Middle_Control", "L_Middle_Control_0", "L_Ring_Control", "L_Ring_Control_0", "L_Pinky_Control", "L_Pinky_Control_0", "R_Thumb_Control", "R_Thumb_Control_0", "R_Index_Control", "R_Index_Control_0", "R_Middle_Control", "R_Middle_Control_0", "R_Ring_Control", "R_Ring_Control_0", "R_Pinky_Control", "R_Pinky_Control_0", "ROOT", "ON_OBJ", "ROOT_pivot", "R_Hip_Rot", "R_FK_FEMUR_CONTROL", "R_FK_KNEE_CONTROL", "R_FK_ANKLE_CONTROL", "R_FK_BALL_CONTROL", "R_IKFootControl", "R_IKLeg_Pole", "COG_CONTROL", "BOTTOM_CONTROL", "LOWER_TORSO_CONTROL", "WAIST1_CONTROL", "UPPER_TORSO_CONTROL", "NECK_CONTROL", "HEAD_CONTROL", "L_SHOULDER_CONTROL", "L_FK_UPPERARM_CONTROL", "L_FK_ELBOW_CONTROL", "L_Hand_Control", "L_IKArm_Control", "L_handAnchor_ctl_con", "L_IKArm_Pole"  };
+		string $m_torsoCtl_members[] = { "m_hip_ctl_ik", "m_spine1_ctl_ik", "m_spine2_ctl_ik", "m_spine3_ctl_ik", "m_chest_ctl_ik", "m_neck_ctl_ik", "m_head_ctl_ik", "ROOT", "COG_CONTROL", "BOTTOM_CONTROL", "LOWER_TORSO_CONTROL", "WAIST1_CONTROL", "UPPER_TORSO_CONTROL", "NECK_CONTROL", "HEAD_CONTROL"  };
+
+		addMemberToSet( $mainSet, "l_armCtl_set", $l_armCtl_members );
+		addMemberToSet( $mainSet, "l_legCtl_set", $l_legCtl_members );
+		addMemberToSet( $mainSet, "r_armCtl_set", $r_armCtl_members );
+		addMemberToSet( $mainSet, "r_legCtl_set", $r_legCtl_members );
+		addMemberToSet( $mainSet, "m_ikCtl_set", $n_ikCtl_members );
+		addMemberToSet( $mainSet, "m_fkCtl_set", $n_fkCtl_members );
+		addMemberToSet( $mainSet, "m_bodyCtl_set", $n_bodyCtl_members );
+		addMemberToSet( $mainSet, "m_torsoCtl_set", $m_torsoCtl_members );	
+	}
+	
+	// facial set
+	if($facial)
+	{
+		string $oldFacialSets[] = { "eye_set", "lipSync_set", "mouth_set", "facial_set" };
+		string $facialSets[] = { "m_eyeCtl_set", "m_lipsyncCtl_set", "m_mouthCtl_set", "m_facialCtl_set" };
+		string $controls[];	
+		
+		for( $i = 0; $i < size($oldFacialSets); $i++ )
+		{
+			string $members[];
+			if( $i != (size($oldFacialSets)-1) )
+			{
+				if( `objExists $oldFacialSets[$i]` )
+				{
+					$members = `sets -q $oldFacialSets[$i]`;					
+					$controls = stringArrayCatenate( $controls, $members );
+					sets -clear $oldFacialSets[$i];
+					delete $oldFacialSets[$i];			
+				}	
+				else
+				{
+					warning ("Set "+$oldFacialSets[$i]+" doesn't exist.");
+					continue;
+				}
+			}
+			if( `objExists $facialSets[$i]` )
+			{
+				sets -clear $facialSets[$i];
+				delete $facialSets[$i];
+			}	
+			sets -name $facialSets[$i];
+			//sets -add $mainSet $facialSets[$i];		
+			if ( $i == (size($oldFacialSets)-1) )
+			{
+				if ( size($controls) > 0 )
+					sets -add $facialSets[$i] $controls;
+			}
+			else
+			{
+				if ( size($members) > 0 )
+					sets -add $facialSets[$i] $members;
+			}		
+		}
+	}
+	
+}
+*/

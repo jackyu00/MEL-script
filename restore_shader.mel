@@ -1,0 +1,34 @@
+
+// restore shader
+{
+    string $sel[] = `ls -sl`;
+    string $shapes[] = `listRelatives -f $sel[0]`;
+
+    for( $shape in $shapes )
+    {
+        string $shapeShortname = `match "[^|]*$" $shape`;
+        string $shader = `substitute "Shape" $shapeShortname ""`;
+        if( `objExists $shader` )
+        {
+             defaultNavigation -source $shader -destination ($shape+".instObjGroups[0]") -connectToExisting;     
+             print ($shape + " was assigned to " + $shader + "\n" ); 
+        }
+        else
+            print ($shape + " was ignored\n"); 
+    }    
+
+}
+
+
+// unparent all shapes to new group
+{
+    string $sel[] = `ls -sl`;
+    string $shapes[] = `listRelatives $sel[0]`;
+    string $grp;
+    for( $shape in $shapes )
+    {
+        $grp = `group -em`;
+        parent -r -s $shape $grp;
+    }
+}
+

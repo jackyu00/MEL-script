@@ -1,0 +1,17 @@
+{
+    string $unknown[] = `ls -type "unknown"`;
+    if( size($unknown) )
+    { 
+        int $i; 
+        for($i=0; $i<size($unknown); $i++) 
+        {
+            if(!`objExists $unknown[$i]`)
+                continue;
+            if(!`referenceQuery -inr $unknown[$i]`)
+            {
+                lockNode -lock 0 $unknown[$i];
+                delete $unknown[$i];
+                }
+        }
+    }  
+}
